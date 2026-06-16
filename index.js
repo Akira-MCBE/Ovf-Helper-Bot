@@ -57,6 +57,17 @@ const MOD_ROLE_IDS = [
 // LOG CHANNEL
 const LOG_CHANNEL_ID = '1516259462124404827';
 
+// VRCHAT GROUP POST BRIDGE
+const VRCHAT_GROUP_ID = process.env.VRCHAT_GROUP_ID || 'grp_38f88b33-f022-40b8-8acf-5264f5e710a2';
+const VRCHAT_POST_CHANNEL_ID = process.env.VRCHAT_POST_CHANNEL_ID || '1451062252974116954';
+const VRCHAT_AUTH_COOKIE = process.env.VRCHAT_AUTH_COOKIE || '';
+const VRCHAT_API_USER_AGENT = process.env.VRCHAT_API_USER_AGENT || 'VRChatDiscordPostBridge/1.0';
+const VRCHAT_POST_POLL_INTERVAL_MS = Math.max(
+    Number.parseInt(process.env.VRCHAT_POST_POLL_INTERVAL_MS || '', 10) || 5 * 60 * 1000,
+    60 * 1000
+);
+const VRCHAT_POST_PUBLIC_ONLY = process.env.VRCHAT_POST_PUBLIC_ONLY !== 'false';
+
 // ==========================================
 // LAVALINK CONFIGURATION
 // ==========================================
@@ -93,6 +104,13 @@ const AUTO_TIMEOUT_DURATION_MS = 60 * 60 * 1000; // 1 hour
 
 // Temporary listener storage for !ask with no question
 const pendingAskUsers = new Map();
+
+// VRChat group post watcher state
+const seenVrchatPostIds = new Set();
+const MAX_SEEN_VRCHAT_POST_IDS = 500;
+let vrchatPostWatcherStarted = false;
+let vrchatPostPollRunning = false;
+let vrchatPostNextAllowedAt = 0;
 
 // ==========================================
 // LAVALINK / SHOUKAKU SETUP
@@ -168,6 +186,8 @@ client.once('clientReady', async () => {
         console.error(error);
 
     }
+
+    startVrchatGroupPostWatcher();
 
 });
 
@@ -255,6 +275,230 @@ function hasModAccess(member) {
 
 function getLogChannel(guild) {
     return guild.channels.cache.get(LOG_CHANNEL_ID);
+}
+
+function getVrchatPostBridgeMissingSettings() {
+
+    const missing = [];
+
+    if (!VRCHAT_GROUP_ID) missing.push('VRCHAT_GROUP_ID');
+    if (!VRCHAT_POST_CHANNEL_ID) missing.push('VRCHAT_POST_CHANNEL_ID');
+    if (!VRCHAT_AUTH_COOKIE) missing.push('VRCHAT_AUTH_COOKIE');
+
+    return missing;
+
+}
+
+function getVrchatAuthCookieHeader() {
+
+    const cookie = VRCHAT_AUTH_COOKIE.trim();
+
+    if (!cookie) return '';
+
+    return cookie.includes('=') ? cookie : `auth=${cookie}`;
+
+}
+
+function rememberVrchatPostId(postId) {
+
+    seenVrchatPostIds.add(postId);
+
+    while (seenVrchatPostIds.size > MAX_SEEN_VRCHAT_POST_IDS) {
+        const oldestPostId = seenVrchatPostIds.values().next().value;
+        seenVrchatPostIds.delete(oldestPostId);
+    }
+
+}
+
+async function fetchVrchatGroupPosts() {
+
+    const params = new URLSearchParams({
+        n: '20',
+        publicOnly: String(VRCHAT_POST_PUBLIC_ONLY)
+    });
+
+    const response = await fetch(
+        `https://api.vrchat.cloud/api/1/groups/${encodeURIComponent(VRCHAT_GROUP_ID)}/posts?${params.toString()}`,
+        {
+            headers: {
+                Accept: 'application/json',
+                Cookie: getVrchatAuthCookieHeader(),
+                'User-Agent': VRCHAT_API_USER_AGENT
+            }
+        }
+    );
+
+    let payload = null;
+
+    try {
+        payload = await response.json();
+    } catch {
+        payload = null;
+    }
+
+    if (response.status === 429) {
+        const retryAfterSeconds = Number.parseInt(response.headers.get('retry-after') || '', 10);
+
+        if (retryAfterSeconds > 0) {
+            vrchatPostNextAllowedAt = Date.now() + (retryAfterSeconds * 1000);
+        }
+
+        throw new Error('VRChat rate limited the group post watcher.');
+    }
+
+    if (!response.ok) {
+        const errorMessage = payload?.error?.message || payload?.message || response.statusText;
+        throw new Error(`VRChat API returned ${response.status}: ${errorMessage}`);
+    }
+
+    if (Array.isArray(payload?.posts)) return payload.posts;
+    if (Array.isArray(payload)) return payload;
+
+    return [];
+
+}
+
+async function getVrchatPostChannel() {
+
+    const channel = client.channels.cache.get(VRCHAT_POST_CHANNEL_ID) ||
+        await client.channels.fetch(VRCHAT_POST_CHANNEL_ID).catch(() => null);
+
+    if (!channel?.isTextBased?.() || !channel.send) return null;
+
+    return channel;
+
+}
+
+function createVrchatPostEmbed(post) {
+
+    const title = truncateText(post.title || 'New VRChat Group Post', 250);
+    const description = truncateText(post.text || 'No post text was provided.', 3900);
+    const createdAt = Date.parse(post.createdAt || post.updatedAt || '');
+
+    const embed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle(title)
+        .setDescription(description)
+        .addFields(
+            {
+                name: 'Group',
+                value: truncateText(post.groupId || VRCHAT_GROUP_ID, 100),
+                inline: true
+            },
+            {
+                name: 'Visibility',
+                value: truncateText(post.visibility || 'unknown', 100),
+                inline: true
+            }
+        );
+
+    if (post.authorId) {
+        embed.addFields({
+            name: 'Author ID',
+            value: truncateText(post.authorId, 100),
+            inline: true
+        });
+    }
+
+    if (post.imageUrl && /^https?:\/\//i.test(post.imageUrl)) {
+        embed.setImage(post.imageUrl);
+    }
+
+    if (!Number.isNaN(createdAt)) {
+        embed.setTimestamp(new Date(createdAt));
+    }
+
+    return embed;
+
+}
+
+async function sendVrchatGroupPost(post) {
+
+    const channel = await getVrchatPostChannel();
+
+    if (!channel) {
+        console.warn(`VRChat post channel not found: ${VRCHAT_POST_CHANNEL_ID}`);
+        return;
+    }
+
+    await channel.send({
+        embeds: [createVrchatPostEmbed(post)],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function checkVrchatGroupPosts(seedOnly = false) {
+
+    if (vrchatPostPollRunning || Date.now() < vrchatPostNextAllowedAt) return;
+
+    vrchatPostPollRunning = true;
+
+    try {
+
+        const posts = await fetchVrchatGroupPosts();
+        const newPosts = [];
+
+        for (const post of posts) {
+
+            if (!post?.id) continue;
+
+            if (!seenVrchatPostIds.has(post.id) && !seedOnly) {
+                newPosts.push(post);
+            }
+
+            rememberVrchatPostId(post.id);
+
+        }
+
+        if (seedOnly) {
+            console.log(`VRChat group post watcher seeded ${seenVrchatPostIds.size} post(s).`);
+            return;
+        }
+
+        newPosts.sort((left, right) =>
+            Date.parse(left.createdAt || left.updatedAt || '') -
+            Date.parse(right.createdAt || right.updatedAt || '')
+        );
+
+        for (const post of newPosts) {
+            await sendVrchatGroupPost(post);
+        }
+
+    } catch (error) {
+
+        console.error('VRChat group post watcher error:', error);
+
+    } finally {
+
+        vrchatPostPollRunning = false;
+
+    }
+
+}
+
+function startVrchatGroupPostWatcher() {
+
+    if (vrchatPostWatcherStarted) return;
+
+    const missingSettings = getVrchatPostBridgeMissingSettings();
+
+    if (missingSettings.length > 0) {
+        console.warn(`VRChat group post watcher disabled. Missing: ${missingSettings.join(', ')}`);
+        return;
+    }
+
+    vrchatPostWatcherStarted = true;
+
+    checkVrchatGroupPosts(true);
+    setInterval(() => {
+        checkVrchatGroupPosts(false);
+    }, VRCHAT_POST_POLL_INTERVAL_MS);
+
+    console.log(`VRChat group post watcher started for ${VRCHAT_GROUP_ID}.`);
+
 }
 
 function formatLoggedMessageContent(content) {
