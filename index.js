@@ -2091,6 +2091,21 @@ client.on('messageCreate', async (message) => {
     }
 
     // ==========================================
+    // PING COMMAND
+    // ==========================================
+
+    if (command === '!ping') {
+
+        const sentMessage = await message.reply('Pong!');
+        const messageLatency = sentMessage.createdTimestamp - message.createdTimestamp;
+        const websocketLatency = Math.round(client.ws.ping);
+
+        await sentMessage.edit(`Pong! Bot ping: **${messageLatency}ms** | WebSocket: **${websocketLatency}ms**`);
+        return;
+
+    }
+
+    // ==========================================
     // HELP COMMAND
     // ==========================================
 
@@ -2105,6 +2120,7 @@ client.on('messageCreate', async (message) => {
                     name: '📘 Public Commands',
                     value:
 `🔹 \`!help\` - Shows this command menu.
+🔹 \`!ping\` - Shows bot ping.
 🔹 \`!ask [question]\` - Ask the VRChat community bot a question.
 🔹 \`!myinvites\` - Shows your invite count.
 🔹 \`!invites [@user/userID]\` - Shows a user's invite count.
