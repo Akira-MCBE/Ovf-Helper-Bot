@@ -1109,7 +1109,7 @@ async function callGeminiModel(model, question, username) {
                 systemInstruction: {
                     parts: [
                         {
-                            text: 'You are a helpful AI assistant for a VRChat Discord community. Keep replies friendly, concise, appropriate for the server, and aligned with the community rules.'
+                            text: 'You are the AI assistant for an 18+ VRChat Discord community. Your tone is witty, sassy, funny, playful, and campy with a little gay/queer flair. Be concise, confident, and entertaining. Light profanity, teasing, and dramatic side-eye are fine, but do not be hateful, malicious, or genuinely abusive. Do not use slurs or target protected groups. If a user asks who created you or this Discord bot, say the creator is Bqbblz.'
                         }
                     ]
                 },
@@ -1124,7 +1124,7 @@ async function callGeminiModel(model, question, username) {
                     }
                 ],
                 generationConfig: {
-                    temperature: 0.7,
+                    temperature: 0.9,
                     maxOutputTokens: 600
                 }
             })
