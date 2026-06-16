@@ -2346,7 +2346,12 @@ async function applyVrcVerifiedRole(member, config) {
 
     await member.roles.add(role, 'VRChat account verified.');
 
-    for (const roleId of config.removeRoleIds) {
+    const rolesToRemoveAfterVerify = getUniqueIdList([
+        AUTO_ROLE_ID,
+        ...config.removeRoleIds
+    ]);
+
+    for (const roleId of rolesToRemoveAfterVerify) {
 
         if (roleId === role.id || !member.roles.cache.has(roleId)) continue;
 
@@ -2366,6 +2371,10 @@ async function applyVrcVerifiedRole(member, config) {
 async function sendVrcVerifyConfigSummary(message) {
 
     const config = getVrcVerifyConfig(message.guild.id);
+    const rolesRemovedAfterVerify = getUniqueIdList([
+        AUTO_ROLE_ID,
+        ...config.removeRoleIds
+    ]);
     const embed = new EmbedBuilder()
         .setColor('#2B90D9')
         .setTitle('VRC Verifier Config')
@@ -2377,8 +2386,8 @@ async function sendVrcVerifyConfigSummary(message) {
             },
             {
                 name: 'Remove After Verify',
-                value: config.removeRoleIds.length > 0
-                    ? config.removeRoleIds.map(roleId => `<@&${roleId}>`).join('\n')
+                value: rolesRemovedAfterVerify.length > 0
+                    ? rolesRemovedAfterVerify.map(roleId => `<@&${roleId}>`).join('\n')
                     : 'None configured.',
                 inline: false
             },
