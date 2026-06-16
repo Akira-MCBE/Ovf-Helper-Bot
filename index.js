@@ -7,9 +7,12 @@ const {
     ButtonBuilder,
     ButtonStyle,
     PermissionsBitField,
-    ActivityType
+    ActivityType,
+    Partials
 } = require('discord.js');
 
+const fs = require('fs');
+const path = require('path');
 const { Shoukaku, Connectors } = require('shoukaku');
 
 const client = new Client({
@@ -21,6 +24,12 @@ const client = new Client({
         GatewayIntentBits.GuildMessageReactions,
         GatewayIntentBits.GuildInvites,
         GatewayIntentBits.GuildVoiceStates
+    ],
+    partials: [
+        Partials.Message,
+        Partials.Channel,
+        Partials.Reaction,
+        Partials.User
     ]
 });
 
@@ -47,6 +56,7 @@ const REACTION_ROLE_ID = '1466511922332438674';
 const MASS_DELETE_PAGE_SIZE = 100;
 const BULK_DELETE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const MASS_DELETE_STATUS_INTERVAL_MS = 10 * 1000;
+const REACTION_ROLE_STORE_FILE = path.join(process.cwd(), 'reaction-roles.json');
 
 const MOD_ROLE_IDS = [
     '1447375395383935066',
@@ -106,6 +116,9 @@ const AUTO_TIMEOUT_DURATION_MS = 60 * 60 * 1000; // 1 hour
 // Temporary listener storage for !ask with no question
 const pendingAskUsers = new Map();
 
+// Reaction role messages
+const reactionRoleMessages = new Map();
+
 // VRChat group post watcher state
 const seenVrchatPostIds = new Set();
 const MAX_SEEN_VRCHAT_POST_IDS = 500;
@@ -153,6 +166,8 @@ shoukaku.on('disconnect', (name, count) => {
 client.once('clientReady', async () => {
 
     console.log(`✅ Logged in as ${client.user.tag}`);
+
+    loadReactionRoleMessages();
 
     client.user.setPresence({
     activities: [
@@ -276,6 +291,303 @@ function hasModAccess(member) {
 
 function getLogChannel(guild) {
     return guild.channels.cache.get(LOG_CHANNEL_ID);
+}
+
+function getReactionRoleKey(guildId, messageId, emojiKey) {
+    return `${guildId}:${messageId}:${emojiKey}`;
+}
+
+function loadReactionRoleMessages() {
+
+    if (!fs.existsSync(REACTION_ROLE_STORE_FILE)) return;
+
+    try {
+
+        const savedMappings = JSON.parse(fs.readFileSync(REACTION_ROLE_STORE_FILE, 'utf8'));
+
+        if (!Array.isArray(savedMappings)) return;
+
+        reactionRoleMessages.clear();
+
+        for (const mapping of savedMappings) {
+
+            if (!mapping?.guildId || !mapping?.messageId || !mapping?.emojiKey || !mapping?.roleId) continue;
+
+            reactionRoleMessages.set(
+                getReactionRoleKey(mapping.guildId, mapping.messageId, mapping.emojiKey),
+                mapping
+            );
+
+        }
+
+        console.log(`Loaded ${reactionRoleMessages.size} reaction role mapping(s).`);
+
+    } catch (error) {
+
+        console.error('Failed to load reaction role mappings:', error);
+
+    }
+
+}
+
+function saveReactionRoleMessages() {
+
+    try {
+
+        fs.writeFileSync(
+            REACTION_ROLE_STORE_FILE,
+            JSON.stringify([...reactionRoleMessages.values()], null, 2)
+        );
+
+    } catch (error) {
+
+        console.error('Failed to save reaction role mappings:', error);
+
+    }
+
+}
+
+function getEmojiKeyFromInput(emojiInput) {
+
+    const customEmojiMatch = String(emojiInput || '').match(/^<a?:\w+:(\d+)>$/);
+
+    return customEmojiMatch ? customEmojiMatch[1] : String(emojiInput || '');
+
+}
+
+function getEmojiKeyFromReaction(reaction) {
+    return reaction.emoji.id || reaction.emoji.name;
+}
+
+function resolveTextChannelFromArg(message, arg) {
+
+    const channelId = String(arg || '').match(/^<#(\d{17,20})>$/)?.[1] ||
+        String(arg || '').match(/^\d{17,20}$/)?.[0];
+
+    const channel = channelId
+        ? message.guild.channels.cache.get(channelId)
+        : message.mentions.channels.first();
+
+    if (!channel?.isTextBased?.() || !channel.send) return null;
+
+    return channel;
+
+}
+
+async function resolveRoleFromArg(message, arg) {
+
+    const roleId = String(arg || '').match(/^<@&(\d{17,20})>$/)?.[1] ||
+        String(arg || '').match(/^\d{17,20}$/)?.[0];
+
+    if (roleId) {
+        return message.guild.roles.cache.get(roleId) ||
+            await message.guild.roles.fetch(roleId).catch(() => null);
+    }
+
+    const roleName = String(arg || '').toLowerCase();
+
+    if (!roleName) return null;
+
+    return message.guild.roles.cache.find(role =>
+        role.name.toLowerCase() === roleName
+    ) || null;
+
+}
+
+async function getBotMember(guild) {
+    return guild.members.me || await guild.members.fetch(client.user.id).catch(() => null);
+}
+
+function formatReactionRoleUsage() {
+    return formatMergedReactionRoleUsage();
+}
+
+function formatReactionRolesUsage() {
+    return formatMergedReactionRoleUsage();
+}
+
+function formatMergedReactionRoleUsage() {
+    return 'Usage:\nSingle: `!reactionrole #channel emoji @role message text`\nMultiple: `!reactionrole #channel message text | emoji @role | emoji @role`\nExample: `!reactionrole #roles Choose your color | 🟢 @Green | 🔴 @Red | 🔵 @Blue`';
+}
+
+function getReactionRoleOptionText(options) {
+
+    return options
+        .map(option => `${option.emoji} ${option.role}`)
+        .join('\n');
+
+}
+
+function canBotAssignRole(botMember, guild, role) {
+    return role.id !== guild.id &&
+        !role.managed &&
+        botMember.roles.highest.comparePositionTo(role) > 0;
+}
+
+async function parseReactionRoleOptions(message, optionSections) {
+
+    const options = [];
+    const seenEmojiKeys = new Set();
+
+    for (const section of optionSections) {
+
+        const [emojiArg, roleArg] = section.trim().split(/\s+/);
+
+        if (!emojiArg || !roleArg) {
+            return {
+                error: `I could not read this option: \`${section}\``
+            };
+        }
+
+        const role = await resolveRoleFromArg(message, roleArg);
+
+        if (!role) {
+            return {
+                error: `I could not find the role for this option: \`${section}\``
+            };
+        }
+
+        const emojiKey = getEmojiKeyFromInput(emojiArg);
+
+        if (seenEmojiKeys.has(emojiKey)) {
+            return {
+                error: `You used the same emoji more than once: ${emojiArg}`
+            };
+        }
+
+        seenEmojiKeys.add(emojiKey);
+
+        options.push({
+            emoji: emojiArg,
+            emojiKey,
+            role
+        });
+
+    }
+
+    if (options.length === 0) {
+        return {
+            error: 'Add at least one emoji and role option.'
+        };
+    }
+
+    return {
+        options
+    };
+
+}
+
+async function parseReactionRoleCommand(message, args) {
+
+    const [channelArg, ...reactionRoleParts] = args;
+    const reactionRoleText = reactionRoleParts.join(' ').trim();
+
+    if (!channelArg || !reactionRoleText) {
+        return {
+            error: formatMergedReactionRoleUsage()
+        };
+    }
+
+    if (reactionRoleText.includes('|')) {
+
+        const sections = reactionRoleText
+            .split('|')
+            .map(section => section.trim())
+            .filter(Boolean);
+        const promptText = sections.shift();
+
+        if (!promptText || sections.length === 0) {
+            return {
+                error: formatMergedReactionRoleUsage()
+            };
+        }
+
+        const parsedOptions = await parseReactionRoleOptions(message, sections);
+
+        if (parsedOptions.error) {
+            return {
+                error: `❌ ${parsedOptions.error}\n${formatMergedReactionRoleUsage()}`
+            };
+        }
+
+        return {
+            channelArg,
+            promptText,
+            options: parsedOptions.options
+        };
+
+    }
+
+    const [emojiArg, roleArg, ...promptParts] = reactionRoleParts;
+    const promptText = promptParts.join(' ').trim();
+
+    if (!emojiArg || !roleArg || !promptText) {
+        return {
+            error: formatMergedReactionRoleUsage()
+        };
+    }
+
+    const parsedOptions = await parseReactionRoleOptions(message, [
+        `${emojiArg} ${roleArg}`
+    ]);
+
+    if (parsedOptions.error) {
+        return {
+            error: `❌ ${parsedOptions.error}\n${formatMergedReactionRoleUsage()}`
+        };
+    }
+
+    return {
+        channelArg,
+        promptText,
+        options: parsedOptions.options
+    };
+
+}
+
+async function handleReactionRole(reaction, user, shouldAddRole) {
+
+    if (user.bot) return;
+
+    try {
+
+        if (reaction.partial) {
+            reaction = await reaction.fetch();
+        }
+
+        if (reaction.message.partial) {
+            await reaction.message.fetch();
+        }
+
+        const guild = reaction.message.guild;
+
+        if (!guild) return;
+
+        const emojiKey = getEmojiKeyFromReaction(reaction);
+        const mapping = reactionRoleMessages.get(
+            getReactionRoleKey(guild.id, reaction.message.id, emojiKey)
+        );
+
+        if (!mapping) return;
+
+        const member = await guild.members.fetch(user.id).catch(() => null);
+        const role = guild.roles.cache.get(mapping.roleId) ||
+            await guild.roles.fetch(mapping.roleId).catch(() => null);
+
+        if (!member || !role) return;
+
+        if (shouldAddRole) {
+            await member.roles.add(role, 'Reaction role selected.');
+        } else {
+            await member.roles.remove(role, 'Reaction role removed.');
+        }
+
+    } catch (error) {
+
+        console.error('Reaction role handler failed:', error);
+
+    }
+
 }
 
 function getVrchatPostBridgeMissingSettings() {
@@ -2126,6 +2438,8 @@ client.on('messageCreate', async (message) => {
 🔹 \`!invites [@user/userID]\` - Shows a user's invite count.
 🔹 \`!leaderboard\` - Shows invite leaderboard.
 🔹 \`!inviteinfo CODE\` - Shows invite code info.
+🔹 \`!reactionrole #channel emoji @role message\` - Creates a reaction role message.
+🔹 \`!reactionrole #channel message | emoji @role | emoji @role\` - Creates one message with multiple reaction roles.
 🔹 \`!vrchat\` / \`!vrc\` - Shows VRChat community info.`
                 },
                 {
@@ -2227,6 +2541,129 @@ client.on('messageCreate', async (message) => {
         });
 
         return;
+    }
+
+    // ==========================================
+    // REACTION ROLE COMMAND
+    // ==========================================
+
+    if (command === '!reactionrole' || command === '!rr' || command === '!reactionroles' || command === '!rrmulti') {
+
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return message.reply('❌ Administrator permission required.');
+        }
+
+        const parsedCommand = await parseReactionRoleCommand(message, args);
+
+        if (parsedCommand.error) {
+            return message.reply(parsedCommand.error);
+        }
+
+        const {
+            channelArg,
+            promptText,
+            options
+        } = parsedCommand;
+
+        const targetChannel = resolveTextChannelFromArg(message, channelArg);
+
+        if (!targetChannel) {
+            return message.reply('❌ I could not find that text channel.');
+        }
+
+        const botMember = await getBotMember(message.guild);
+
+        if (!botMember) {
+            return message.reply('❌ I could not check my server permissions.');
+        }
+
+        if (!botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+            return message.reply('❌ I need the **Manage Roles** permission to assign reaction roles.');
+        }
+
+        const unassignableRole = options.find(option =>
+            !canBotAssignRole(botMember, message.guild, option.role)
+        );
+
+        if (unassignableRole) {
+            return message.reply(`❌ I cannot assign ${unassignableRole.role.name}. Move my bot role above it in the role list.`);
+        }
+
+        const channelPermissions = targetChannel.permissionsFor(botMember);
+
+        if (!channelPermissions?.has([
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.AddReactions,
+            PermissionsBitField.Flags.ReadMessageHistory
+        ])) {
+            return message.reply('❌ I need View Channel, Send Messages, Add Reactions, and Read Message History in that channel.');
+        }
+
+        const hasMultipleOptions = options.length > 1;
+
+        const reactionRoleEmbed = new EmbedBuilder()
+            .setColor(hasMultipleOptions ? '#2B90D9' : options[0].role.color || '#2B90D9')
+            .setTitle(hasMultipleOptions ? 'Choose Your Roles' : 'Choose Your Role')
+            .setDescription(promptText)
+            .addFields({
+                name: hasMultipleOptions ? 'Role Options' : 'Role',
+                value: hasMultipleOptions
+                    ? truncateText(getReactionRoleOptionText(options), 1024)
+                    : `React with ${options[0].emoji} to get ${options[0].role}.`
+            })
+            .setFooter({
+                text: `Reaction role${hasMultipleOptions ? 's' : ''} created by ${message.author.tag}`
+            })
+            .setTimestamp();
+
+        const roleMessage = await targetChannel.send({
+            embeds: [reactionRoleEmbed],
+            allowedMentions: {
+                parse: []
+            }
+        });
+
+        try {
+
+            for (const option of options) {
+                await roleMessage.react(option.emoji);
+            }
+
+        } catch (error) {
+
+            await roleMessage.delete().catch(() => {});
+            console.error('Failed to add reaction role emoji:', error);
+            return message.reply('❌ I could not react with one of those emojis. Use normal emojis or custom emojis from this server.');
+
+        }
+
+        for (const option of options) {
+
+            const mapping = {
+                guildId: message.guild.id,
+                channelId: targetChannel.id,
+                messageId: roleMessage.id,
+                emojiKey: option.emojiKey,
+                emoji: option.emoji,
+                roleId: option.role.id,
+                prompt: promptText,
+                createdBy: message.author.id,
+                createdAt: new Date().toISOString()
+            };
+
+            reactionRoleMessages.set(
+                getReactionRoleKey(mapping.guildId, mapping.messageId, mapping.emojiKey),
+                mapping
+            );
+
+        }
+
+        saveReactionRoleMessages();
+
+        await message.reply(`✅ Reaction role message created in ${targetChannel} with **${options.length}** role option${hasMultipleOptions ? 's' : ''}.`);
+        return;
+
     }
 
     // ==========================================
@@ -3657,6 +4094,19 @@ client.on('messageCreate', async (message) => {
     }
 
 });
+
+// ==========================================
+// REACTION ROLE HANDLERS
+// ==========================================
+
+client.on('messageReactionAdd', async (reaction, user) => {
+    await handleReactionRole(reaction, user, true);
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+    await handleReactionRole(reaction, user, false);
+});
+
 // ==========================================
 // BUTTON ROLE HANDLER
 // ==========================================
