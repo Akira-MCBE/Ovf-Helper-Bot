@@ -7,6 +7,7 @@ const {
     ButtonBuilder,
     ButtonStyle,
     PermissionsBitField,
+    ChannelType,
     ActivityType,
     Partials
 } = require('discord.js');
@@ -57,6 +58,10 @@ const MASS_DELETE_PAGE_SIZE = 100;
 const BULK_DELETE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const MASS_DELETE_STATUS_INTERVAL_MS = 10 * 1000;
 const REACTION_ROLE_STORE_FILE = path.join(process.cwd(), 'reaction-roles.json');
+const TICKET_CONFIG_FILE = path.join(process.cwd(), 'ticket-config.json');
+const TICKET_STORE_FILE = path.join(process.cwd(), 'tickets.json');
+const TICKET_TRANSCRIPT_FETCH_LIMIT = 100;
+const TICKET_CLOSE_DELETE_DELAY_MS = 5000;
 
 const MOD_ROLE_IDS = [
     '1447375395383935066',
@@ -119,6 +124,10 @@ const pendingAskUsers = new Map();
 // Reaction role messages
 const reactionRoleMessages = new Map();
 
+// Ticket system
+const ticketConfigs = new Map();
+const ticketRecords = new Map();
+
 // VRChat group post watcher state
 const seenVrchatPostIds = new Set();
 const MAX_SEEN_VRCHAT_POST_IDS = 500;
@@ -168,6 +177,8 @@ client.once('clientReady', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
 
     loadReactionRoleMessages();
+    loadTicketConfigs();
+    loadTicketRecords();
 
     client.user.setPresence({
     activities: [
@@ -342,6 +353,1588 @@ function saveReactionRoleMessages() {
     } catch (error) {
 
         console.error('Failed to save reaction role mappings:', error);
+
+    }
+
+}
+
+function getUniqueIdList(values) {
+
+    if (!Array.isArray(values)) return [];
+
+    return [...new Set(
+        values
+            .map(value => String(value || '').trim())
+            .filter(value => /^\d{17,20}$/.test(value))
+    )];
+
+}
+
+function normalizeTicketConfig(config = {}) {
+
+    const hasSupportRoles = Object.prototype.hasOwnProperty.call(config, 'supportRoleIds');
+
+    return {
+        supportRoleIds: getUniqueIdList(hasSupportRoles ? config.supportRoleIds : MOD_ROLE_IDS),
+        adminRoleIds: getUniqueIdList(config.adminRoleIds),
+        categoryId: /^\d{17,20}$/.test(String(config.categoryId || '')) ? String(config.categoryId) : null,
+        logChannelId: /^\d{17,20}$/.test(String(config.logChannelId || '')) ? String(config.logChannelId) : LOG_CHANNEL_ID,
+        nextTicketNumber: Math.max(1, Number.parseInt(config.nextTicketNumber || '1', 10) || 1)
+    };
+
+}
+
+function loadTicketConfigs() {
+
+    if (!fs.existsSync(TICKET_CONFIG_FILE)) return;
+
+    try {
+
+        const savedConfigs = JSON.parse(fs.readFileSync(TICKET_CONFIG_FILE, 'utf8'));
+
+        if (!savedConfigs || typeof savedConfigs !== 'object') return;
+
+        ticketConfigs.clear();
+
+        for (const [guildId, config] of Object.entries(savedConfigs)) {
+
+            if (!/^\d{17,20}$/.test(guildId)) continue;
+
+            ticketConfigs.set(guildId, normalizeTicketConfig(config));
+
+        }
+
+        console.log(`Loaded ticket config for ${ticketConfigs.size} guild(s).`);
+
+    } catch (error) {
+
+        console.error('Failed to load ticket configs:', error);
+
+    }
+
+}
+
+function saveTicketConfigs() {
+
+    try {
+
+        fs.writeFileSync(
+            TICKET_CONFIG_FILE,
+            JSON.stringify(Object.fromEntries(ticketConfigs.entries()), null, 2)
+        );
+
+    } catch (error) {
+
+        console.error('Failed to save ticket configs:', error);
+
+    }
+
+}
+
+function getTicketConfig(guildId) {
+
+    if (!ticketConfigs.has(guildId)) {
+        ticketConfigs.set(guildId, normalizeTicketConfig());
+    }
+
+    return ticketConfigs.get(guildId);
+
+}
+
+function setTicketConfig(guildId, updater) {
+
+    const config = {
+        ...getTicketConfig(guildId)
+    };
+
+    updater(config);
+
+    const normalizedConfig = normalizeTicketConfig(config);
+    ticketConfigs.set(guildId, normalizedConfig);
+    saveTicketConfigs();
+
+    return normalizedConfig;
+
+}
+
+function normalizeTicketRecord(record = {}) {
+
+    const guildId = String(record.guildId || '');
+    const channelId = String(record.channelId || '');
+    const ownerId = String(record.ownerId || '');
+
+    if (!/^\d{17,20}$/.test(guildId) ||
+        !/^\d{17,20}$/.test(channelId) ||
+        !/^\d{17,20}$/.test(ownerId)) {
+        return null;
+    }
+
+    return {
+        guildId,
+        channelId,
+        ownerId,
+        ticketNumber: Math.max(0, Number.parseInt(record.ticketNumber || record.number || '0', 10) || 0),
+        status: record.status === 'closed' ? 'closed' : 'open',
+        createdAt: record.createdAt || new Date().toISOString(),
+        reason: String(record.reason || 'No reason provided.'),
+        claimedBy: /^\d{17,20}$/.test(String(record.claimedBy || '')) ? String(record.claimedBy) : null,
+        escalated: Boolean(record.escalated),
+        escalatedBy: /^\d{17,20}$/.test(String(record.escalatedBy || '')) ? String(record.escalatedBy) : null,
+        escalatedAt: record.escalatedAt || null,
+        escalationReason: record.escalationReason || null,
+        addedUserIds: getUniqueIdList(record.addedUserIds)
+    };
+
+}
+
+function loadTicketRecords() {
+
+    if (!fs.existsSync(TICKET_STORE_FILE)) return;
+
+    try {
+
+        const savedRecords = JSON.parse(fs.readFileSync(TICKET_STORE_FILE, 'utf8'));
+        const records = Array.isArray(savedRecords)
+            ? savedRecords
+            : Object.values(savedRecords || {});
+
+        ticketRecords.clear();
+
+        for (const rawRecord of records) {
+
+            const record = normalizeTicketRecord(rawRecord);
+
+            if (!record || record.status !== 'open') continue;
+
+            ticketRecords.set(record.channelId, record);
+
+        }
+
+        console.log(`Loaded ${ticketRecords.size} open ticket record(s).`);
+
+    } catch (error) {
+
+        console.error('Failed to load ticket records:', error);
+
+    }
+
+}
+
+function saveTicketRecords() {
+
+    try {
+
+        fs.writeFileSync(
+            TICKET_STORE_FILE,
+            JSON.stringify([...ticketRecords.values()], null, 2)
+        );
+
+    } catch (error) {
+
+        console.error('Failed to save ticket records:', error);
+
+    }
+
+}
+
+function getTicketConfigUsage() {
+
+    return [
+        'Ticket config usage:',
+        '`!ticketconfig list`',
+        '`!ticketconfig support add @role`',
+        '`!ticketconfig support remove @role`',
+        '`!ticketconfig admin add @role`',
+        '`!ticketconfig admin remove @role`',
+        '`!ticketconfig category category_id`',
+        '`!ticketconfig category none`',
+        '`!ticketconfig logs #channel`',
+        '`!ticketconfig reset`'
+    ].join('\n');
+
+}
+
+function formatTicketRoleList(roleIds) {
+
+    return roleIds.length > 0
+        ? roleIds.map(roleId => `<@&${roleId}>`).join('\n')
+        : 'None configured.';
+
+}
+
+function getTicketRecordForChannel(channel) {
+
+    if (!channel?.guild) return null;
+
+    const existingRecord = ticketRecords.get(channel.id);
+
+    if (existingRecord) return existingRecord;
+
+    const ownerId = String(channel.topic || '').match(/ticket-owner:(\d{17,20})/)?.[1];
+
+    if (!ownerId) return null;
+
+    const ticketNumber = String(channel.topic || '').match(/Ticket #?(\d+)/i)?.[1] || 0;
+    const inferredRecord = normalizeTicketRecord({
+        guildId: channel.guild.id,
+        channelId: channel.id,
+        ownerId,
+        ticketNumber,
+        reason: 'Recovered from channel topic.'
+    });
+
+    if (!inferredRecord) return null;
+
+    ticketRecords.set(channel.id, inferredRecord);
+    saveTicketRecords();
+
+    return inferredRecord;
+
+}
+
+function isTicketOwner(member, record) {
+    return member?.id === record?.ownerId;
+}
+
+function memberHasAnyRole(member, roleIds) {
+    return roleIds.some(roleId => member?.roles?.cache?.has(roleId));
+}
+
+function hasTicketSupportAccess(member, config) {
+
+    return (
+        member?.permissions?.has(PermissionsBitField.Flags.Administrator) ||
+        memberHasAnyRole(member, config.supportRoleIds) ||
+        memberHasAnyRole(member, config.adminRoleIds)
+    );
+
+}
+
+function hasTicketAdminAccess(member, config) {
+
+    return (
+        member?.permissions?.has(PermissionsBitField.Flags.Administrator) ||
+        memberHasAnyRole(member, config.adminRoleIds)
+    );
+
+}
+
+function canUseTicket(member, record, config) {
+    return isTicketOwner(member, record) || hasTicketSupportAccess(member, config);
+}
+
+function canManageTicket(member, config) {
+    return hasTicketSupportAccess(member, config);
+}
+
+async function resolveCategoryFromArg(message, arg) {
+
+    const categoryId = String(arg || '').match(/^<#(\d{17,20})>$/)?.[1] ||
+        String(arg || '').match(/^\d{17,20}$/)?.[0];
+
+    if (categoryId) {
+
+        const channel = message.guild.channels.cache.get(categoryId) ||
+            await message.guild.channels.fetch(categoryId).catch(() => null);
+
+        return channel?.type === ChannelType.GuildCategory ? channel : null;
+
+    }
+
+    const categoryName = String(arg || '').toLowerCase().trim();
+
+    if (!categoryName) return null;
+
+    return message.guild.channels.cache.find(channel =>
+        channel.type === ChannelType.GuildCategory &&
+        channel.name.toLowerCase() === categoryName
+    ) || null;
+
+}
+
+async function resolveTicketCategory(guild, config) {
+
+    if (!config.categoryId) return null;
+
+    const channel = guild.channels.cache.get(config.categoryId) ||
+        await guild.channels.fetch(config.categoryId).catch(() => null);
+
+    return channel?.type === ChannelType.GuildCategory ? channel : null;
+
+}
+
+async function getTicketLogChannel(guild, config = getTicketConfig(guild.id)) {
+
+    const channelId = config.logChannelId || LOG_CHANNEL_ID;
+    const channel = guild.channels.cache.get(channelId) ||
+        await guild.channels.fetch(channelId).catch(() => null);
+
+    return channel?.isTextBased?.() && channel.send ? channel : null;
+
+}
+
+function sanitizeTicketChannelPart(value, fallback = 'ticket') {
+
+    const cleaned = String(value || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 42);
+
+    return cleaned || fallback;
+
+}
+
+function getTicketChannelName(member, ticketNumber) {
+    return `ticket-${ticketNumber}-${sanitizeTicketChannelPart(member.user.username, 'user')}`.slice(0, 95);
+}
+
+function getTranscriptFileName(channel, record) {
+
+    const ticketLabel = record?.ticketNumber ? `ticket-${record.ticketNumber}` : channel.id;
+
+    return `${ticketLabel}-${sanitizeTicketChannelPart(channel.name, 'transcript')}-transcript.txt`;
+
+}
+
+function getTicketPermissionOverwrites(guild, ownerId, config) {
+
+    const allowTicketMember = [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.EmbedLinks
+    ];
+
+    const allowTicketStaff = [
+        ...allowTicketMember,
+        PermissionsBitField.Flags.ManageMessages
+    ];
+
+    const overwrites = [
+        {
+            id: guild.roles.everyone.id,
+            deny: [
+                PermissionsBitField.Flags.ViewChannel
+            ]
+        },
+        {
+            id: ownerId,
+            allow: allowTicketMember
+        },
+        {
+            id: client.user.id,
+            allow: [
+                ...allowTicketStaff,
+                PermissionsBitField.Flags.ManageChannels
+            ]
+        }
+    ];
+
+    for (const roleId of config.supportRoleIds) {
+
+        if (!guild.roles.cache.has(roleId)) continue;
+
+        overwrites.push({
+            id: roleId,
+            allow: allowTicketStaff
+        });
+
+    }
+
+    return overwrites;
+
+}
+
+function createTicketOpenRow() {
+
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('ticket_open')
+            .setLabel('Open Ticket')
+            .setStyle(ButtonStyle.Success)
+    );
+
+}
+
+function createTicketControlRow(record = {}) {
+
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('ticket_claim')
+            .setLabel(record.claimedBy ? 'Claimed' : 'Claim')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(Boolean(record.claimedBy)),
+        new ButtonBuilder()
+            .setCustomId('ticket_escalate')
+            .setLabel(record.escalated ? 'Escalated' : 'Escalate')
+            .setStyle(ButtonStyle.Danger)
+            .setDisabled(Boolean(record.escalated)),
+        new ButtonBuilder()
+            .setCustomId('ticket_close')
+            .setLabel('Close')
+            .setStyle(ButtonStyle.Secondary)
+    );
+
+}
+
+async function findOpenTicketChannelForUser(guild, userId) {
+
+    let removedStaleRecord = false;
+
+    for (const record of ticketRecords.values()) {
+
+        if (record.guildId !== guild.id || record.ownerId !== userId || record.status !== 'open') continue;
+
+        const channel = guild.channels.cache.get(record.channelId) ||
+            await guild.channels.fetch(record.channelId).catch(() => null);
+
+        if (channel) return channel;
+
+        ticketRecords.delete(record.channelId);
+        removedStaleRecord = true;
+
+    }
+
+    if (removedStaleRecord) {
+        saveTicketRecords();
+    }
+
+    return null;
+
+}
+
+async function sendTicketLog(guild, title, fields = [], color = '#5865F2', config = getTicketConfig(guild.id)) {
+
+    const logChannel = await getTicketLogChannel(guild, config);
+
+    if (!logChannel) return null;
+
+    const embed = new EmbedBuilder()
+        .setColor(color)
+        .setTitle(title)
+        .addFields(
+            fields
+                .filter(field => field?.name && field?.value)
+                .map(field => ({
+                    name: field.name,
+                    value: truncateText(String(field.value), 1000),
+                    inline: Boolean(field.inline)
+                }))
+        )
+        .setTimestamp();
+
+    await logChannel.send({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    }).catch(() => {});
+
+    return logChannel;
+
+}
+
+async function createTicketForMember(guild, member, reason = 'No reason provided.') {
+
+    const config = getTicketConfig(guild.id);
+    const existingTicketChannel = await findOpenTicketChannelForUser(guild, member.id);
+
+    if (existingTicketChannel) {
+        return {
+            ok: false,
+            message: `You already have an open ticket: ${existingTicketChannel}`
+        };
+    }
+
+    const botMember = await getBotMember(guild);
+
+    if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        return {
+            ok: false,
+            message: 'I need the Manage Channels permission to create ticket channels.'
+        };
+    }
+
+    const ticketNumber = config.nextTicketNumber;
+    const category = await resolveTicketCategory(guild, config);
+    const channelName = getTicketChannelName(member, ticketNumber);
+
+    const ticketChannelOptions = {
+        name: channelName,
+        type: ChannelType.GuildText,
+        topic: `Ticket #${ticketNumber} | Owner: ${member.user.tag} (${member.id}) | ticket-owner:${member.id}`,
+        permissionOverwrites: getTicketPermissionOverwrites(guild, member.id, config)
+    };
+
+    if (category) {
+        ticketChannelOptions.parent = category.id;
+    }
+
+    const ticketChannel = await guild.channels.create(ticketChannelOptions);
+
+    const record = normalizeTicketRecord({
+        guildId: guild.id,
+        channelId: ticketChannel.id,
+        ownerId: member.id,
+        ticketNumber,
+        createdAt: new Date().toISOString(),
+        reason
+    });
+
+    ticketRecords.set(ticketChannel.id, record);
+    config.nextTicketNumber = ticketNumber + 1;
+    ticketConfigs.set(guild.id, config);
+    saveTicketConfigs();
+    saveTicketRecords();
+
+    const supportRoleIds = config.supportRoleIds.filter(roleId => guild.roles.cache.has(roleId));
+    const supportMentions = supportRoleIds.map(roleId => `<@&${roleId}>`).join(' ');
+    const welcomeEmbed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle(`Ticket #${ticketNumber}`)
+        .setDescription('Support will be with you soon. Use `!close` when this is finished, or `!escalate` if you need an admin.')
+        .addFields(
+            {
+                name: 'Opened By',
+                value: `${member.user.tag} (${member.id})`,
+                inline: false
+            },
+            {
+                name: 'Reason',
+                value: truncateText(reason, 1000),
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+    await ticketChannel.send({
+        content: [member.toString(), supportMentions].filter(Boolean).join(' '),
+        embeds: [welcomeEmbed],
+        components: [createTicketControlRow(record)],
+        allowedMentions: {
+            users: [member.id],
+            roles: supportRoleIds
+        }
+    });
+
+    await sendTicketLog(
+        guild,
+        'Ticket Opened',
+        [
+            {
+                name: 'Ticket',
+                value: `${ticketChannel} (#${ticketNumber})`,
+                inline: true
+            },
+            {
+                name: 'Opened By',
+                value: `${member.user.tag} (${member.id})`,
+                inline: false
+            },
+            {
+                name: 'Reason',
+                value: reason || 'No reason provided.',
+                inline: false
+            }
+        ],
+        '#2B90D9',
+        config
+    );
+
+    return {
+        ok: true,
+        channel: ticketChannel,
+        record
+    };
+
+}
+
+async function fetchAllTicketMessages(channel) {
+
+    const messages = [];
+    let before;
+
+    while (true) {
+
+        const fetchedMessages = await channel.messages.fetch({
+            limit: TICKET_TRANSCRIPT_FETCH_LIMIT,
+            before
+        });
+
+        if (!fetchedMessages.size) break;
+
+        messages.push(...fetchedMessages.values());
+        before = fetchedMessages.last()?.id;
+
+        if (fetchedMessages.size < TICKET_TRANSCRIPT_FETCH_LIMIT || !before) break;
+
+    }
+
+    return messages.sort((left, right) => left.createdTimestamp - right.createdTimestamp);
+
+}
+
+function formatTranscriptEmbed(embed, index) {
+
+    const lines = [`Embed ${index + 1}:`];
+
+    if (embed.title) lines.push(`Title: ${embed.title}`);
+    if (embed.description) lines.push(`Description: ${embed.description}`);
+    if (embed.url) lines.push(`URL: ${embed.url}`);
+
+    if (Array.isArray(embed.fields) && embed.fields.length > 0) {
+
+        for (const field of embed.fields) {
+            lines.push(`Field - ${field.name}: ${field.value}`);
+        }
+
+    }
+
+    return lines.join('\n');
+
+}
+
+function formatTranscriptMessage(message) {
+
+    const lines = [];
+    const timestamp = new Date(message.createdTimestamp).toISOString();
+    const author = message.author
+        ? `${message.author.tag} (${message.author.id})`
+        : 'Unknown User';
+
+    lines.push(`[${timestamp}] ${author}`);
+
+    if (message.editedTimestamp) {
+        lines.push(`Edited: ${new Date(message.editedTimestamp).toISOString()}`);
+    }
+
+    if (message.reference?.messageId) {
+        lines.push(`Reply To Message ID: ${message.reference.messageId}`);
+    }
+
+    lines.push(message.content?.trim() || '[No text content]');
+
+    if (message.attachments?.size > 0) {
+
+        lines.push('Attachments:');
+
+        for (const attachment of message.attachments.values()) {
+            lines.push(`- ${attachment.name || 'attachment'}: ${attachment.url}`);
+        }
+
+    }
+
+    if (message.stickers?.size > 0) {
+
+        lines.push('Stickers:');
+
+        for (const sticker of message.stickers.values()) {
+            lines.push(`- ${sticker.name || sticker.id}`);
+        }
+
+    }
+
+    if (message.embeds?.length > 0) {
+
+        lines.push('Embeds:');
+        message.embeds.forEach((embed, index) => {
+            lines.push(formatTranscriptEmbed(embed, index));
+        });
+
+    }
+
+    if (message.components?.length > 0) {
+        lines.push(`[Components: ${message.components.length}]`);
+    }
+
+    return lines.join('\n');
+
+}
+
+function buildTicketTranscript(channel, record, messages, actorUser, reason, actionLabel) {
+
+    const owner = channel.guild.members.cache.get(record.ownerId)?.user;
+    const header = [
+        `Ticket Transcript - ${channel.guild.name}`,
+        `Action: ${actionLabel}`,
+        `Ticket: #${record.ticketNumber || channel.id}`,
+        `Channel: #${channel.name} (${channel.id})`,
+        `Opened By: ${owner ? `${owner.tag} (${owner.id})` : record.ownerId}`,
+        `Created At: ${record.createdAt}`,
+        `Closed/Logged By: ${actorUser.tag || actorUser.username} (${actorUser.id})`,
+        `Reason: ${reason || 'No reason provided.'}`,
+        `Messages: ${messages.length}`,
+        ''.padEnd(60, '=')
+    ];
+
+    const separator = `\n${''.padEnd(60, '-')}\n`;
+    const body = messages.map(formatTranscriptMessage).join(separator);
+
+    return `${header.join('\n')}\n\n${body || '[No messages found.]'}\n`;
+
+}
+
+async function sendTicketTranscriptToLogs(channel, record, actorUser, reason, actionLabel = 'Ticket Closed') {
+
+    const config = getTicketConfig(channel.guild.id);
+    const logChannel = await getTicketLogChannel(channel.guild, config);
+
+    if (!logChannel) {
+        throw new Error('Ticket log channel not found. Set it with `!ticketconfig logs #channel` or check `LOG_CHANNEL_ID`.');
+    }
+
+    const messages = await fetchAllTicketMessages(channel);
+    const transcriptText = buildTicketTranscript(channel, record, messages, actorUser, reason, actionLabel);
+    const transcriptFile = new AttachmentBuilder(Buffer.from(transcriptText, 'utf8'), {
+        name: getTranscriptFileName(channel, record)
+    });
+
+    const embed = new EmbedBuilder()
+        .setColor(actionLabel === 'Ticket Closed' ? '#FF5555' : '#9B59B6')
+        .setTitle(actionLabel)
+        .addFields(
+            {
+                name: 'Ticket',
+                value: `${channel.name} (${channel.id})`,
+                inline: false
+            },
+            {
+                name: 'Opened By',
+                value: `<@${record.ownerId}> (${record.ownerId})`,
+                inline: false
+            },
+            {
+                name: 'Handled By',
+                value: `${actorUser.tag || actorUser.username} (${actorUser.id})`,
+                inline: false
+            },
+            {
+                name: 'Messages Logged',
+                value: `${messages.length}`,
+                inline: true
+            },
+            {
+                name: 'Reason',
+                value: truncateText(reason || 'No reason provided.', 1000),
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+    await logChannel.send({
+        embeds: [embed],
+        files: [transcriptFile],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+    return {
+        logChannel,
+        messagesLogged: messages.length
+    };
+
+}
+
+async function closeTicketChannel(channel, actorUser, reason = 'No reason provided.') {
+
+    const record = getTicketRecordForChannel(channel);
+
+    if (!record) {
+        throw new Error('This does not look like a ticket channel.');
+    }
+
+    await channel.send('Creating ticket transcript before closing...').catch(() => {});
+
+    const transcriptResult = await sendTicketTranscriptToLogs(
+        channel,
+        record,
+        actorUser,
+        reason,
+        'Ticket Closed'
+    );
+
+    record.status = 'closed';
+    ticketRecords.delete(channel.id);
+    saveTicketRecords();
+
+    await channel.send(
+        `Transcript saved to ${transcriptResult.logChannel}. Closing this ticket in ${TICKET_CLOSE_DELETE_DELAY_MS / 1000} seconds.`
+    ).catch(() => {});
+
+    setTimeout(() => {
+        channel.delete(`Ticket closed by ${actorUser.tag || actorUser.username}: ${reason}`)
+            .catch(error => console.error('Failed to delete closed ticket channel:', error));
+    }, TICKET_CLOSE_DELETE_DELAY_MS);
+
+    return transcriptResult;
+
+}
+
+async function claimTicketChannel(channel, member, shouldClaim = true) {
+
+    const record = getTicketRecordForChannel(channel);
+
+    if (!record) {
+        return {
+            ok: false,
+            message: 'This command only works inside a ticket channel.'
+        };
+    }
+
+    const config = getTicketConfig(channel.guild.id);
+
+    if (!canManageTicket(member, config)) {
+        return {
+            ok: false,
+            message: 'Only ticket support staff can claim tickets.'
+        };
+    }
+
+    if (shouldClaim && record.claimedBy) {
+        return {
+            ok: false,
+            message: `This ticket is already claimed by <@${record.claimedBy}>.`
+        };
+    }
+
+    record.claimedBy = shouldClaim ? member.id : null;
+    ticketRecords.set(channel.id, record);
+    saveTicketRecords();
+
+    await channel.send(shouldClaim
+        ? `Ticket claimed by ${member}.`
+        : `Ticket claim removed by ${member}.`
+    );
+
+    await sendTicketLog(
+        channel.guild,
+        shouldClaim ? 'Ticket Claimed' : 'Ticket Unclaimed',
+        [
+            {
+                name: 'Ticket',
+                value: `${channel} (#${record.ticketNumber || channel.id})`,
+                inline: true
+            },
+            {
+                name: 'Staff',
+                value: `${member.user.tag} (${member.id})`,
+                inline: false
+            }
+        ],
+        shouldClaim ? '#57F287' : '#FEE75C',
+        config
+    );
+
+    return {
+        ok: true,
+        message: shouldClaim ? 'Ticket claimed.' : 'Ticket claim removed.'
+    };
+
+}
+
+async function escalateTicketChannel(channel, member, reason = 'Admin requested.') {
+
+    const record = getTicketRecordForChannel(channel);
+
+    if (!record) {
+        return {
+            ok: false,
+            message: 'This command only works inside a ticket channel.'
+        };
+    }
+
+    const config = getTicketConfig(channel.guild.id);
+
+    if (!canUseTicket(member, record, config)) {
+        return {
+            ok: false,
+            message: 'Only the ticket opener or support staff can escalate this ticket.'
+        };
+    }
+
+    if (record.escalated) {
+        return {
+            ok: false,
+            message: 'This ticket has already been escalated.'
+        };
+    }
+
+    const adminRoleIds = config.adminRoleIds.filter(roleId => channel.guild.roles.cache.has(roleId));
+    const allowAdmin = {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+        AttachFiles: true,
+        EmbedLinks: true
+    };
+
+    for (const roleId of adminRoleIds) {
+        await channel.permissionOverwrites.edit(roleId, allowAdmin).catch(() => {});
+    }
+
+    record.escalated = true;
+    record.escalatedBy = member.id;
+    record.escalatedAt = new Date().toISOString();
+    record.escalationReason = reason;
+    ticketRecords.set(channel.id, record);
+    saveTicketRecords();
+
+    const adminMentions = adminRoleIds.map(roleId => `<@&${roleId}>`).join(' ');
+    const embed = new EmbedBuilder()
+        .setColor('#ED4245')
+        .setTitle('Ticket Escalated')
+        .setDescription(adminRoleIds.length > 0
+            ? 'An admin role has been requested for this ticket.'
+            : 'No admin role is configured yet. The request was still logged.')
+        .addFields(
+            {
+                name: 'Requested By',
+                value: `${member.user.tag} (${member.id})`,
+                inline: false
+            },
+            {
+                name: 'Reason',
+                value: truncateText(reason || 'Admin requested.', 1000),
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+    await channel.send({
+        content: adminMentions || null,
+        embeds: [embed],
+        allowedMentions: {
+            roles: adminRoleIds
+        }
+    });
+
+    await sendTicketLog(
+        channel.guild,
+        'Ticket Escalated',
+        [
+            {
+                name: 'Ticket',
+                value: `${channel} (#${record.ticketNumber || channel.id})`,
+                inline: true
+            },
+            {
+                name: 'Requested By',
+                value: `${member.user.tag} (${member.id})`,
+                inline: false
+            },
+            {
+                name: 'Reason',
+                value: reason || 'Admin requested.',
+                inline: false
+            },
+            {
+                name: 'Admin Roles',
+                value: adminRoleIds.length > 0 ? adminRoleIds.map(roleId => `<@&${roleId}>`).join(', ') : 'None configured.',
+                inline: false
+            }
+        ],
+        '#ED4245',
+        config
+    );
+
+    return {
+        ok: true,
+        message: adminRoleIds.length > 0
+            ? 'Ticket escalated and admin role notified.'
+            : 'Ticket escalated, but no admin role is configured yet.'
+    };
+
+}
+
+async function addOrRemoveTicketUser(message, args, shouldAdd) {
+
+    const channel = message.channel;
+    const member = message.member;
+
+    const record = getTicketRecordForChannel(channel);
+
+    if (!record) {
+        return {
+            ok: false,
+            message: 'This command only works inside a ticket channel.'
+        };
+    }
+
+    const config = getTicketConfig(channel.guild.id);
+
+    if (!canManageTicket(member, config)) {
+        return {
+            ok: false,
+            message: 'Only ticket support staff can add or remove ticket users.'
+        };
+    }
+
+    const targetMember = await resolveMemberFromArgs(message, args);
+
+    if (!targetMember) {
+        return {
+            ok: false,
+            message: `Usage: \`${shouldAdd ? '!add' : '!remove'} @user/userID\``
+        };
+    }
+
+    if (!shouldAdd && targetMember.id === record.ownerId) {
+        return {
+            ok: false,
+            message: 'You cannot remove the person who opened the ticket.'
+        };
+    }
+
+    if (shouldAdd) {
+
+        await channel.permissionOverwrites.edit(targetMember.id, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+            AttachFiles: true,
+            EmbedLinks: true
+        });
+
+        record.addedUserIds = getUniqueIdList([
+            ...record.addedUserIds,
+            targetMember.id
+        ]);
+
+    } else {
+
+        await channel.permissionOverwrites.delete(targetMember.id).catch(() => {});
+        record.addedUserIds = record.addedUserIds.filter(userId => userId !== targetMember.id);
+
+    }
+
+    ticketRecords.set(channel.id, record);
+    saveTicketRecords();
+
+    await channel.send(shouldAdd
+        ? `${targetMember} was added to this ticket by ${member}.`
+        : `${targetMember.user.tag} was removed from this ticket by ${member}.`
+    );
+
+    return {
+        ok: true,
+        message: shouldAdd ? 'User added to ticket.' : 'User removed from ticket.'
+    };
+
+}
+
+async function sendTicketConfigSummary(message) {
+
+    const config = getTicketConfig(message.guild.id);
+    const embed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle('Ticket System Config')
+        .addFields(
+            {
+                name: 'Support Roles',
+                value: formatTicketRoleList(config.supportRoleIds),
+                inline: false
+            },
+            {
+                name: 'Admin Roles',
+                value: formatTicketRoleList(config.adminRoleIds),
+                inline: false
+            },
+            {
+                name: 'Ticket Category',
+                value: config.categoryId ? `<#${config.categoryId}>` : 'No category set.',
+                inline: true
+            },
+            {
+                name: 'Transcript Logs',
+                value: config.logChannelId ? `<#${config.logChannelId}>` : `<#${LOG_CHANNEL_ID}>`,
+                inline: true
+            },
+            {
+                name: 'Next Ticket Number',
+                value: `${config.nextTicketNumber}`,
+                inline: true
+            },
+            {
+                name: 'Commands',
+                value: getTicketConfigUsage(),
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+    await message.channel.send({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleTicketConfigCommand(message, args) {
+
+    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return message.reply('Administrator permission required.');
+    }
+
+    const section = args[0]?.toLowerCase();
+
+    if (!section || section === 'list' || section === 'show') {
+        await sendTicketConfigSummary(message);
+        return;
+    }
+
+    if (section === 'reset') {
+
+        ticketConfigs.set(message.guild.id, normalizeTicketConfig());
+        saveTicketConfigs();
+
+        await message.reply('Ticket config reset to defaults.');
+        return;
+
+    }
+
+    if (section === 'support' || section === 'admin') {
+
+        const action = args[1]?.toLowerCase();
+        const roleArg = args.slice(2).join(' ').trim();
+
+        if (!['add', 'remove'].includes(action) || !roleArg) {
+            return message.reply(getTicketConfigUsage());
+        }
+
+        const role = await resolveRoleFromArg(message, roleArg);
+
+        if (!role) {
+            return message.reply('I could not find that role.');
+        }
+
+        const roleKey = section === 'support' ? 'supportRoleIds' : 'adminRoleIds';
+
+        setTicketConfig(message.guild.id, config => {
+
+            if (action === 'add') {
+                config[roleKey] = getUniqueIdList([
+                    ...config[roleKey],
+                    role.id
+                ]);
+            } else {
+                config[roleKey] = config[roleKey].filter(roleId => roleId !== role.id);
+            }
+
+        });
+
+        await message.reply(`${role} was ${action === 'add' ? 'added to' : 'removed from'} ticket ${section} roles.`);
+        return;
+
+    }
+
+    if (section === 'category') {
+
+        const categoryArg = args.slice(1).join(' ').trim();
+
+        if (!categoryArg) {
+            return message.reply('Usage: `!ticketconfig category category_id` or `!ticketconfig category none`');
+        }
+
+        if (['none', 'clear', 'off', 'remove'].includes(categoryArg.toLowerCase())) {
+
+            setTicketConfig(message.guild.id, config => {
+                config.categoryId = null;
+            });
+
+            await message.reply('Ticket category cleared. New tickets will be created without a category.');
+            return;
+
+        }
+
+        const category = await resolveCategoryFromArg(message, categoryArg);
+
+        if (!category) {
+            return message.reply('I could not find that category. Use the category ID or exact category name.');
+        }
+
+        setTicketConfig(message.guild.id, config => {
+            config.categoryId = category.id;
+        });
+
+        await message.reply(`Ticket category set to **${category.name}**.`);
+        return;
+
+    }
+
+    if (section === 'logs' || section === 'log') {
+
+        const channelArg = args[1];
+
+        if (!channelArg) {
+            return message.reply('Usage: `!ticketconfig logs #channel`');
+        }
+
+        const channel = resolveTextChannelFromArg(message, channelArg);
+
+        if (!channel) {
+            return message.reply('I could not find that text channel.');
+        }
+
+        setTicketConfig(message.guild.id, config => {
+            config.logChannelId = channel.id;
+        });
+
+        await message.reply(`Ticket transcripts will be sent to ${channel}.`);
+        return;
+
+    }
+
+    await message.reply(getTicketConfigUsage());
+
+}
+
+async function handleTicketSetupCommand(message, args) {
+
+    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return message.reply('Administrator permission required.');
+    }
+
+    let targetChannel = message.channel;
+    let promptParts = args;
+
+    const possibleChannel = resolveTextChannelFromArg(message, args[0]);
+
+    if (possibleChannel) {
+        targetChannel = possibleChannel;
+        promptParts = args.slice(1);
+    }
+
+    const prompt = promptParts.join(' ').trim() ||
+        'Need help from the team? Open a ticket and describe what you need.';
+    const botMember = await getBotMember(message.guild);
+    const channelPermissions = targetChannel.permissionsFor(botMember);
+
+    if (!channelPermissions?.has([
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.EmbedLinks
+    ])) {
+        return message.reply('I need View Channel, Send Messages, and Embed Links in that channel.');
+    }
+
+    const config = getTicketConfig(message.guild.id);
+    const embed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle('Support Tickets')
+        .setDescription(prompt)
+        .addFields(
+            {
+                name: 'Support Roles',
+                value: formatTicketRoleList(config.supportRoleIds),
+                inline: false
+            }
+        )
+        .setFooter({
+            text: 'Click the button below to open a private ticket.'
+        })
+        .setTimestamp();
+
+    await targetChannel.send({
+        embeds: [embed],
+        components: [createTicketOpenRow()],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+    await message.reply(`Ticket panel created in ${targetChannel}.`);
+
+}
+
+async function handleTicketOpenCommand(message, args) {
+
+    const reason = args.join(' ').trim() || 'No reason provided.';
+
+    try {
+
+        const result = await createTicketForMember(message.guild, message.member, reason);
+
+        if (!result.ok) {
+            return message.reply(result.message);
+        }
+
+        await message.reply(`Ticket created: ${result.channel}`);
+
+    } catch (error) {
+
+        console.error('Ticket create command error:', error);
+        await message.reply('Failed to create a ticket. Check my channel permissions and ticket config.');
+
+    }
+
+}
+
+async function handleTicketCloseCommand(message, args) {
+
+    const record = getTicketRecordForChannel(message.channel);
+
+    if (!record) {
+        return message.reply('This command only works inside a ticket channel.');
+    }
+
+    const config = getTicketConfig(message.guild.id);
+
+    if (!canUseTicket(message.member, record, config)) {
+        return message.reply('Only the ticket opener or ticket support staff can close this ticket.');
+    }
+
+    const reason = args.join(' ').trim() || 'No reason provided.';
+
+    try {
+
+        await closeTicketChannel(message.channel, message.author, reason);
+
+    } catch (error) {
+
+        console.error('Ticket close command error:', error);
+        await message.reply(`Failed to close ticket: ${error.message}`);
+
+    }
+
+}
+
+async function handleTicketTranscriptCommand(message, args) {
+
+    const record = getTicketRecordForChannel(message.channel);
+
+    if (!record) {
+        return message.reply('This command only works inside a ticket channel.');
+    }
+
+    const config = getTicketConfig(message.guild.id);
+
+    if (!canUseTicket(message.member, record, config)) {
+        return message.reply('Only the ticket opener or ticket support staff can create a transcript.');
+    }
+
+    const reason = args.join(' ').trim() || 'Manual transcript requested.';
+
+    try {
+
+        const result = await sendTicketTranscriptToLogs(
+            message.channel,
+            record,
+            message.author,
+            reason,
+            'Ticket Transcript Created'
+        );
+
+        await message.reply(`Transcript sent to ${result.logChannel}.`);
+
+    } catch (error) {
+
+        console.error('Ticket transcript command error:', error);
+        await message.reply(`Failed to create transcript: ${error.message}`);
+
+    }
+
+}
+
+async function handleTicketClaimCommand(message, shouldClaim) {
+
+    const result = await claimTicketChannel(message.channel, message.member, shouldClaim);
+
+    if (!result.ok) {
+        await message.reply(result.message);
+    }
+
+}
+
+async function handleTicketEscalateCommand(message, args) {
+
+    const reason = args.join(' ').trim() || 'Admin requested.';
+    const result = await escalateTicketChannel(message.channel, message.member, reason);
+
+    if (!result.ok) {
+        await message.reply(result.message);
+        return;
+    }
+
+    await message.reply(result.message);
+
+}
+
+async function handleTicketRenameCommand(message, args) {
+
+    const record = getTicketRecordForChannel(message.channel);
+
+    if (!record) {
+        return message.reply('This command only works inside a ticket channel.');
+    }
+
+    const config = getTicketConfig(message.guild.id);
+
+    if (!canManageTicket(message.member, config)) {
+        return message.reply('Only ticket support staff can rename tickets.');
+    }
+
+    const requestedName = args.join(' ').trim();
+
+    if (!requestedName) {
+        return message.reply('Usage: `!rename new-ticket-name`');
+    }
+
+    const newNamePart = sanitizeTicketChannelPart(requestedName, 'renamed');
+    const newName = record.ticketNumber
+        ? `ticket-${record.ticketNumber}-${newNamePart}`
+        : `ticket-${newNamePart}`;
+
+    try {
+
+        await message.channel.setName(newName.slice(0, 95));
+        await message.reply(`Ticket renamed to **${message.channel.name}**.`);
+
+        await sendTicketLog(
+            message.guild,
+            'Ticket Renamed',
+            [
+                {
+                    name: 'Ticket',
+                    value: `${message.channel} (#${record.ticketNumber || message.channel.id})`,
+                    inline: true
+                },
+                {
+                    name: 'Renamed By',
+                    value: `${message.author.tag} (${message.author.id})`,
+                    inline: false
+                },
+                {
+                    name: 'New Name',
+                    value: newName.slice(0, 95),
+                    inline: false
+                }
+            ],
+            '#FEE75C',
+            config
+        );
+
+    } catch (error) {
+
+        console.error('Ticket rename command error:', error);
+        await message.reply('Failed to rename this ticket.');
+
+    }
+
+}
+
+async function handleTicketButtonInteraction(interaction) {
+
+    if (!interaction.guild) {
+        return interaction.reply({
+            content: 'Tickets only work in a server.',
+            ephemeral: true
+        });
+    }
+
+    const member = await interaction.guild.members.fetch(interaction.user.id)
+        .catch(() => interaction.member);
+
+    if (interaction.customId === 'ticket_open') {
+
+        await interaction.deferReply({
+            ephemeral: true
+        });
+
+        try {
+
+            const result = await createTicketForMember(
+                interaction.guild,
+                member,
+                'Opened from the ticket panel.'
+            );
+
+            await interaction.editReply(result.ok
+                ? `Ticket created: ${result.channel}`
+                : result.message
+            );
+
+        } catch (error) {
+
+            console.error('Ticket open button error:', error);
+            await interaction.editReply('Failed to create a ticket. Check my channel permissions and ticket config.');
+
+        }
+
+        return;
+
+    }
+
+    const record = getTicketRecordForChannel(interaction.channel);
+
+    if (!record) {
+        return interaction.reply({
+            content: 'This button only works inside a ticket channel.',
+            ephemeral: true
+        });
+    }
+
+    const config = getTicketConfig(interaction.guild.id);
+
+    if (interaction.customId === 'ticket_claim') {
+
+        const result = await claimTicketChannel(interaction.channel, member, true);
+
+        return interaction.reply({
+            content: result.message,
+            ephemeral: true
+        });
+
+    }
+
+    if (interaction.customId === 'ticket_escalate') {
+
+        const result = await escalateTicketChannel(
+            interaction.channel,
+            member,
+            'Escalated with the ticket button.'
+        );
+
+        return interaction.reply({
+            content: result.message,
+            ephemeral: true
+        });
+
+    }
+
+    if (interaction.customId === 'ticket_close') {
+
+        if (!canUseTicket(member, record, config)) {
+            return interaction.reply({
+                content: 'Only the ticket opener or ticket support staff can close this ticket.',
+                ephemeral: true
+            });
+        }
+
+        await interaction.deferReply({
+            ephemeral: true
+        });
+
+        try {
+
+            await interaction.editReply('Closing ticket and creating transcript...');
+            await closeTicketChannel(
+                interaction.channel,
+                interaction.user,
+                'Closed with the ticket button.'
+            );
+
+        } catch (error) {
+
+            console.error('Ticket close button error:', error);
+            await interaction.editReply(`Failed to close ticket: ${error.message}`);
+
+        }
 
     }
 
@@ -2456,7 +4049,20 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 🔹 \`!inviteinfo CODE\` - Shows invite code info.
 🔹 \`!reactionrole #channel emoji @role message\` - Creates a reaction role message.
 🔹 \`!reactionrole #channel message | emoji @role | emoji @role\` - Creates one message with multiple reaction roles.
-🔹 \`!vrchat\` / \`!vrc\` - Shows VRChat community info.`
+🔹 \`!vrchat\` / \`!vrc\` - Shows VRChat community info.
+🎫 \`!ticket [reason]\` - Opens a private support ticket.`
+                },
+                {
+                    name: '🎫 Ticket Commands',
+                    value:
+`\`!ticketsetup [#channel]\` - Creates the open-ticket button panel.
+\`!ticketconfig\` - Shows and edits ticket support/admin roles.
+\`!close [reason]\` - Saves a transcript and closes the ticket.
+\`!transcript [reason]\` - Sends a ticket transcript to logs.
+\`!claim\` / \`!unclaim\` - Claims or releases a ticket.
+\`!add @user\` / \`!remove @user\` - Adds or removes a user.
+\`!rename name\` - Renames the ticket.
+\`!escalate [reason]\` - Requests an admin.`
                 },
                 {
                     name: '🎉 Fun Commands',
@@ -2525,6 +4131,75 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             embeds: [helpEmbed]
         });
 
+        return;
+    }
+
+    // ==========================================
+    // TICKET SYSTEM COMMANDS
+    // ==========================================
+
+    if (command === '!ticketsetup' || command === '!ticketpanel' || command === '!setup-ticket') {
+        await handleTicketSetupCommand(message, args);
+        return;
+    }
+
+    if (command === '!ticketconfig' || command === '!ticketsconfig') {
+        await handleTicketConfigCommand(message, args);
+        return;
+    }
+
+    if (command === '!ticket' || command === '!new' || command === '!openticket') {
+        await handleTicketOpenCommand(message, args);
+        return;
+    }
+
+    if (command === '!close' || command === '!ticketclose' || command === '!closeticket') {
+        await handleTicketCloseCommand(message, args);
+        return;
+    }
+
+    if (command === '!transcript' || command === '!tickettranscript') {
+        await handleTicketTranscriptCommand(message, args);
+        return;
+    }
+
+    if (command === '!claim') {
+        await handleTicketClaimCommand(message, true);
+        return;
+    }
+
+    if (command === '!unclaim') {
+        await handleTicketClaimCommand(message, false);
+        return;
+    }
+
+    if (command === '!add' || command === '!ticketadd') {
+        const result = await addOrRemoveTicketUser(message, args, true);
+
+        if (!result.ok) {
+            await message.reply(result.message);
+        }
+
+        return;
+    }
+
+    if (command === '!remove' || command === '!ticketremove') {
+        const result = await addOrRemoveTicketUser(message, args, false);
+
+        if (!result.ok) {
+            await message.reply(result.message);
+        }
+
+        return;
+    }
+
+    if (command === '!rename' || command === '!ticketrename') {
+        await handleTicketRenameCommand(message, args);
+        return;
+    }
+
+    if (command === '!escalate' || command === '!admin') {
+        await handleTicketEscalateCommand(message, args);
         return;
     }
 
@@ -4124,6 +5799,11 @@ client.on('messageReactionRemove', async (reaction, user) => {
 client.on('interactionCreate', async (interaction) => {
 
     if (!interaction.isButton()) return;
+
+    if (interaction.customId.startsWith('ticket_')) {
+        await handleTicketButtonInteraction(interaction);
+        return;
+    }
 
     if (interaction.customId === 'verify_role_button') {
 
