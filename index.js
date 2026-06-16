@@ -2350,7 +2350,7 @@ client.on('messageCreate', async (message) => {
 
         await message.channel.send(
 `# ${VRCHAT_SERVER_NAME}
-
+# Welcome!
 
 Looking for a chill VRChat group where you can relax, meet new people, and enjoy events without pressure or strict roleplay expectations? OverFlow might be the place for you!
 
