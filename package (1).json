@@ -1,0 +1,13 @@
+{
+  "name": "ovf-helper-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord bot with moderation, automod, invite tracking, logs, verification, and Lavalink music.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "shoukaku": "^4.3.0"
+  }
+}
