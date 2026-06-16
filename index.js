@@ -1692,7 +1692,7 @@ client.on('messageCreate', async (message) => {
                 }
             )
             .setFooter({
-                text: 'VRChat Community Bot **made by Bqbblz**',
+                text: 'VRChat Community Bot made by Bqbblz',
                 iconURL: client.user.displayAvatarURL()
             })
             .setTimestamp();
