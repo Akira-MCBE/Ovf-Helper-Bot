@@ -1623,18 +1623,10 @@ async function handleTicketSetupCommand(message, args) {
         return message.reply('I need View Channel, Send Messages, and Embed Links in that channel.');
     }
 
-    const config = getTicketConfig(message.guild.id);
     const embed = new EmbedBuilder()
         .setColor('#2B90D9')
         .setTitle('Support Tickets')
         .setDescription(prompt)
-        .addFields(
-            {
-                name: 'Support Roles',
-                value: formatTicketRoleList(config.supportRoleIds),
-                inline: false
-            }
-        )
         .setFooter({
             text: 'Click the button below to open a private ticket.'
         })
