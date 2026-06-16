@@ -2351,6 +2351,7 @@ client.on('messageCreate', async (message) => {
         await message.channel.send(
 `# ${VRCHAT_SERVER_NAME}
 
+
 Looking for a chill VRChat group where you can relax, meet new people, and enjoy events without pressure or strict roleplay expectations? OverFlow might be the place for you!
 
 OverFlow is an 18+ VRChat community focused on socializing, entertainment, events, and creative expression. Whether you enjoy hanging out in voice chat, attending community events, sharing your creativity, or simply making new friends, we aim to provide a welcoming space where everyone can feel comfortable being themselves.
