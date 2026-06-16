@@ -48,7 +48,7 @@ const GEMINI_MODELS = (process.env.GEMINI_MODELS || GEMINI_MODEL || 'gemini-2.5-
     .map(model => model.trim())
     .filter(Boolean);
 
-const VRCHAT_SERVER_NAME = process.env.VRCHAT_SERVER_NAME || 'VRChat Community';
+const VRCHAT_SERVER_NAME = process.env.VRCHAT_SERVER_NAME || ':sparkles: **OverFlow | 18+ VRChat Community** :sparkles:';
 const VRCHAT_COMMUNITY_LINK = process.env.VRCHAT_COMMUNITY_LINK || 'Check the pinned channels for current VRChat links.';
 
 const AUTO_ROLE_ID = '1447372762988675273';
@@ -2350,7 +2350,6 @@ client.on('messageCreate', async (message) => {
 
         await message.channel.send(
 `# ${VRCHAT_SERVER_NAME}
-### :sparkles: **OverFlow | 18+ VRChat Community** :sparkles:
 
 Looking for a chill VRChat group where you can relax, meet new people, and enjoy events without pressure or strict roleplay expectations? OverFlow might be the place for you!
 
