@@ -893,8 +893,6 @@ async function createTicketForMember(guild, member, reason = 'No reason provided
     saveTicketConfigs();
     saveTicketRecords();
 
-    const supportRoleIds = config.supportRoleIds.filter(roleId => guild.roles.cache.has(roleId));
-    const supportMentions = supportRoleIds.map(roleId => `<@&${roleId}>`).join(' ');
     const welcomeEmbed = new EmbedBuilder()
         .setColor('#2B90D9')
         .setTitle(`Ticket #${ticketNumber}`)
@@ -914,12 +912,12 @@ async function createTicketForMember(guild, member, reason = 'No reason provided
         .setTimestamp();
 
     await ticketChannel.send({
-        content: [member.toString(), supportMentions].filter(Boolean).join(' '),
+        content: member.toString(),
         embeds: [welcomeEmbed],
         components: [createTicketControlRow(record)],
         allowedMentions: {
             users: [member.id],
-            roles: supportRoleIds
+            roles: []
         }
     });
 
@@ -1267,6 +1265,10 @@ async function escalateTicketChannel(channel, member, reason = 'Admin requested.
     }
 
     const adminRoleIds = config.adminRoleIds.filter(roleId => channel.guild.roles.cache.has(roleId));
+    const supportRoleIdsToRemove = config.supportRoleIds.filter(roleId =>
+        channel.guild.roles.cache.has(roleId) &&
+        !adminRoleIds.includes(roleId)
+    );
     const allowAdmin = {
         ViewChannel: true,
         SendMessages: true,
@@ -1274,6 +1276,18 @@ async function escalateTicketChannel(channel, member, reason = 'Admin requested.
         AttachFiles: true,
         EmbedLinks: true
     };
+    const denySupport = {
+        ViewChannel: false,
+        SendMessages: false,
+        ReadMessageHistory: false,
+        AttachFiles: false,
+        EmbedLinks: false,
+        ManageMessages: false
+    };
+
+    for (const roleId of supportRoleIdsToRemove) {
+        await channel.permissionOverwrites.edit(roleId, denySupport).catch(() => {});
+    }
 
     for (const roleId of adminRoleIds) {
         await channel.permissionOverwrites.edit(roleId, allowAdmin).catch(() => {});
