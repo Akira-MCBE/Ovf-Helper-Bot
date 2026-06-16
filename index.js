@@ -51,7 +51,7 @@ const GEMINI_MODELS = (process.env.GEMINI_MODELS || GEMINI_MODEL || 'gemini-2.5-
 const VRCHAT_SERVER_NAME = process.env.VRCHAT_SERVER_NAME || 'VRChat Community';
 const VRCHAT_COMMUNITY_LINK = process.env.VRCHAT_COMMUNITY_LINK || 'Check the pinned channels for current VRChat links.';
 
-const AUTO_ROLE_ID = '1507583292537442374';
+const AUTO_ROLE_ID = '1447372762988675273';
 const REACTION_ROLE_ID = '1466511922332438674';
 const MASS_DELETE_PAGE_SIZE = 100;
 const BULK_DELETE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
