@@ -14,6 +14,7 @@ const {
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { Shoukaku, Connectors } = require('shoukaku');
 
 const client = new Client({
@@ -63,6 +64,11 @@ const TICKET_STORE_FILE = path.join(process.cwd(), 'tickets.json');
 const TICKET_TRANSCRIPT_FETCH_LIMIT = 100;
 const TICKET_CLOSE_DELETE_DELAY_MS = 5000;
 const DEFAULT_TICKET_CATEGORY_ID = '1447439654159908954';
+const VRC_VERIFY_CONFIG_FILE = path.join(process.cwd(), 'vrc-verifier-config.json');
+const VRC_VERIFY_STORE_FILE = path.join(process.cwd(), 'vrc-verifications.json');
+const VRC_VERIFY_CODE_TTL_MS = 30 * 60 * 1000;
+const VRC_VERIFY_CODE_PREFIX = 'OVF-';
+const DEFAULT_VRC_VERIFIED_ROLE_ID = process.env.VRC_VERIFIED_ROLE_ID || REACTION_ROLE_ID;
 
 const MOD_ROLE_IDS = [
     '1447375395383935066',
@@ -129,6 +135,11 @@ const reactionRoleMessages = new Map();
 const ticketConfigs = new Map();
 const ticketRecords = new Map();
 
+// VRChat verifier
+const vrcVerifyConfigs = new Map();
+const vrcVerificationRecords = new Map();
+const pendingVrcVerifications = new Map();
+
 // VRChat group post watcher state
 const seenVrchatPostIds = new Set();
 const MAX_SEEN_VRCHAT_POST_IDS = 500;
@@ -180,6 +191,8 @@ client.once('clientReady', async () => {
     loadReactionRoleMessages();
     loadTicketConfigs();
     loadTicketRecords();
+    loadVrcVerifyConfigs();
+    loadVrcVerificationRecords();
 
     client.user.setPresence({
     activities: [
@@ -1946,6 +1959,830 @@ async function handleTicketButtonInteraction(interaction) {
         }
 
     }
+
+}
+
+function getVrcVerifyKey(guildId, userId) {
+    return `${guildId}:${userId}`;
+}
+
+function normalizeVrcVerifyConfig(config = {}) {
+
+    const verifiedRoleId = String(config.verifiedRoleId || DEFAULT_VRC_VERIFIED_ROLE_ID || '');
+
+    return {
+        verifiedRoleId: /^\d{17,20}$/.test(verifiedRoleId) ? verifiedRoleId : null,
+        removeRoleIds: getUniqueIdList(config.removeRoleIds),
+        logChannelId: /^\d{17,20}$/.test(String(config.logChannelId || '')) ? String(config.logChannelId) : LOG_CHANNEL_ID
+    };
+
+}
+
+function loadVrcVerifyConfigs() {
+
+    if (!fs.existsSync(VRC_VERIFY_CONFIG_FILE)) return;
+
+    try {
+
+        const savedConfigs = JSON.parse(fs.readFileSync(VRC_VERIFY_CONFIG_FILE, 'utf8'));
+
+        if (!savedConfigs || typeof savedConfigs !== 'object') return;
+
+        vrcVerifyConfigs.clear();
+
+        for (const [guildId, config] of Object.entries(savedConfigs)) {
+
+            if (!/^\d{17,20}$/.test(guildId)) continue;
+
+            vrcVerifyConfigs.set(guildId, normalizeVrcVerifyConfig(config));
+
+        }
+
+        console.log(`Loaded VRC verifier config for ${vrcVerifyConfigs.size} guild(s).`);
+
+    } catch (error) {
+
+        console.error('Failed to load VRC verifier configs:', error);
+
+    }
+
+}
+
+function saveVrcVerifyConfigs() {
+
+    try {
+
+        fs.writeFileSync(
+            VRC_VERIFY_CONFIG_FILE,
+            JSON.stringify(Object.fromEntries(vrcVerifyConfigs.entries()), null, 2)
+        );
+
+    } catch (error) {
+
+        console.error('Failed to save VRC verifier configs:', error);
+
+    }
+
+}
+
+function getVrcVerifyConfig(guildId) {
+
+    if (!vrcVerifyConfigs.has(guildId)) {
+        vrcVerifyConfigs.set(guildId, normalizeVrcVerifyConfig());
+    }
+
+    return vrcVerifyConfigs.get(guildId);
+
+}
+
+function setVrcVerifyConfig(guildId, updater) {
+
+    const config = {
+        ...getVrcVerifyConfig(guildId)
+    };
+
+    updater(config);
+
+    const normalizedConfig = normalizeVrcVerifyConfig(config);
+    vrcVerifyConfigs.set(guildId, normalizedConfig);
+    saveVrcVerifyConfigs();
+
+    return normalizedConfig;
+
+}
+
+function normalizeVrcVerificationRecord(record = {}) {
+
+    const guildId = String(record.guildId || '');
+    const discordUserId = String(record.discordUserId || '');
+    const vrcUserId = String(record.vrcUserId || '');
+
+    if (!/^\d{17,20}$/.test(guildId) ||
+        !/^\d{17,20}$/.test(discordUserId) ||
+        !/^usr_[0-9a-fA-F-]{36}$/.test(vrcUserId)) {
+        return null;
+    }
+
+    return {
+        guildId,
+        discordUserId,
+        vrcUserId,
+        vrcDisplayName: String(record.vrcDisplayName || 'Unknown VRChat User'),
+        verifiedAt: record.verifiedAt || new Date().toISOString(),
+        verifiedBy: record.verifiedBy || 'profile-code'
+    };
+
+}
+
+function loadVrcVerificationRecords() {
+
+    if (!fs.existsSync(VRC_VERIFY_STORE_FILE)) return;
+
+    try {
+
+        const savedRecords = JSON.parse(fs.readFileSync(VRC_VERIFY_STORE_FILE, 'utf8'));
+        const records = Array.isArray(savedRecords)
+            ? savedRecords
+            : Object.values(savedRecords || {});
+
+        vrcVerificationRecords.clear();
+
+        for (const rawRecord of records) {
+
+            const record = normalizeVrcVerificationRecord(rawRecord);
+
+            if (!record) continue;
+
+            vrcVerificationRecords.set(
+                getVrcVerifyKey(record.guildId, record.discordUserId),
+                record
+            );
+
+        }
+
+        console.log(`Loaded ${vrcVerificationRecords.size} VRC verification record(s).`);
+
+    } catch (error) {
+
+        console.error('Failed to load VRC verification records:', error);
+
+    }
+
+}
+
+function saveVrcVerificationRecords() {
+
+    try {
+
+        fs.writeFileSync(
+            VRC_VERIFY_STORE_FILE,
+            JSON.stringify([...vrcVerificationRecords.values()], null, 2)
+        );
+
+    } catch (error) {
+
+        console.error('Failed to save VRC verification records:', error);
+
+    }
+
+}
+
+function getVrcVerifyConfigUsage() {
+
+    return [
+        'VRC verifier config usage:',
+        '`!vrcverifyconfig list`',
+        '`!vrcverifyconfig role @role`',
+        '`!vrcverifyconfig logs #channel`',
+        '`!vrcverifyconfig remove add @role`',
+        '`!vrcverifyconfig remove remove @role`',
+        '`!vrcverifyconfig remove clear`',
+        '`!vrcverifyconfig reset`'
+    ].join('\n');
+
+}
+
+async function getVrcVerifierLogChannel(guild, config = getVrcVerifyConfig(guild.id)) {
+
+    const channelId = config.logChannelId || LOG_CHANNEL_ID;
+    const channel = guild.channels.cache.get(channelId) ||
+        await guild.channels.fetch(channelId).catch(() => null);
+
+    return channel?.isTextBased?.() && channel.send ? channel : null;
+
+}
+
+function generateVrcVerifyCode() {
+    return `${VRC_VERIFY_CODE_PREFIX}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+function cleanupExpiredVrcVerifications() {
+
+    const now = Date.now();
+
+    for (const [key, pending] of pendingVrcVerifications.entries()) {
+
+        if (pending.expiresAt <= now) {
+            pendingVrcVerifications.delete(key);
+        }
+
+    }
+
+}
+
+function getPendingVrcVerification(guildId, userId) {
+
+    cleanupExpiredVrcVerifications();
+
+    return pendingVrcVerifications.get(getVrcVerifyKey(guildId, userId)) || null;
+
+}
+
+function extractVrcUserIdFromInput(input) {
+    return String(input || '').match(/usr_[0-9a-fA-F-]{36}/)?.[0] || null;
+}
+
+function normalizeVrcDisplayName(text) {
+
+    return String(text || '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
+
+}
+
+async function fetchVrchatApiJson(endpointPath, params = null) {
+
+    if (!VRCHAT_AUTH_COOKIE) {
+        throw new Error('Missing VRCHAT_AUTH_COOKIE. Add it to your environment variables before using VRC verification.');
+    }
+
+    const url = new URL(`https://api.vrchat.cloud/api/1${endpointPath}`);
+
+    if (params) {
+        for (const [key, value] of Object.entries(params)) {
+            url.searchParams.set(key, String(value));
+        }
+    }
+
+    const response = await fetch(url, {
+        headers: {
+            Accept: 'application/json',
+            Cookie: getVrchatAuthCookieHeader(),
+            'User-Agent': VRCHAT_API_USER_AGENT
+        }
+    });
+
+    const payload = await response.json().catch(() => null);
+
+    if (response.status === 429) {
+        throw new Error('VRChat rate limited the verifier. Try again later.');
+    }
+
+    if (!response.ok) {
+        const errorMessage = payload?.error?.message || payload?.message || response.statusText;
+        throw new Error(`VRChat API returned ${response.status}: ${errorMessage}`);
+    }
+
+    return payload;
+
+}
+
+async function fetchVrchatUserById(userId) {
+    return await fetchVrchatApiJson(`/users/${encodeURIComponent(userId)}`);
+}
+
+async function searchVrchatUsers(displayName) {
+
+    const users = await fetchVrchatApiJson('/users', {
+        search: displayName,
+        n: 10
+    });
+
+    return Array.isArray(users) ? users : [];
+
+}
+
+async function resolveVrchatUser(identifier) {
+
+    const trimmedIdentifier = String(identifier || '').trim();
+
+    if (!trimmedIdentifier) return null;
+
+    const userId = extractVrcUserIdFromInput(trimmedIdentifier);
+
+    if (userId) {
+        return await fetchVrchatUserById(userId);
+    }
+
+    const users = await searchVrchatUsers(trimmedIdentifier);
+    const normalizedIdentifier = normalizeVrcDisplayName(trimmedIdentifier);
+    const matchedUser = users.find(user =>
+        normalizeVrcDisplayName(user.displayName) === normalizedIdentifier
+    ) || users[0] || null;
+
+    if (!matchedUser?.id) return null;
+
+    return await fetchVrchatUserById(matchedUser.id);
+
+}
+
+function getVrcProfileVerificationText(user) {
+
+    return [
+        user?.bio,
+        user?.statusDescription,
+        user?.pronouns,
+        ...(Array.isArray(user?.bioLinks) ? user.bioLinks : [])
+    ]
+        .filter(Boolean)
+        .join('\n');
+
+}
+
+function vrcProfileContainsCode(user, code) {
+    return getVrcProfileVerificationText(user).toLowerCase().includes(String(code || '').toLowerCase());
+}
+
+function isVrchatUserAgeVerified18Plus(user) {
+
+    const status = String(user?.ageVerificationStatus || '').toLowerCase().trim();
+
+    return user?.ageVerified === true && status === '18+';
+
+}
+
+async function sendVrcVerificationLog(guild, title, fields = [], color = '#2B90D9', config = getVrcVerifyConfig(guild.id)) {
+
+    const logChannel = await getVrcVerifierLogChannel(guild, config);
+
+    if (!logChannel) return;
+
+    const embed = new EmbedBuilder()
+        .setColor(color)
+        .setTitle(title)
+        .addFields(
+            fields
+                .filter(field => field?.name && field?.value)
+                .map(field => ({
+                    name: field.name,
+                    value: truncateText(String(field.value), 1000),
+                    inline: Boolean(field.inline)
+                }))
+        )
+        .setTimestamp();
+
+    await logChannel.send({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    }).catch(() => {});
+
+}
+
+async function applyVrcVerifiedRole(member, config) {
+
+    if (!config.verifiedRoleId) {
+        throw new Error('No VRC verified role is configured. Use `!vrcverifyconfig role @role`.');
+    }
+
+    const role = member.guild.roles.cache.get(config.verifiedRoleId) ||
+        await member.guild.roles.fetch(config.verifiedRoleId).catch(() => null);
+
+    if (!role) {
+        throw new Error('The configured VRC verified role could not be found.');
+    }
+
+    const botMember = await getBotMember(member.guild);
+
+    if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+        throw new Error('I need the Manage Roles permission to assign the VRC verified role.');
+    }
+
+    if (!canBotAssignRole(botMember, member.guild, role)) {
+        throw new Error(`I cannot assign ${role.name}. Move my bot role above it in the role list.`);
+    }
+
+    await member.roles.add(role, 'VRChat account verified.');
+
+    for (const roleId of config.removeRoleIds) {
+
+        if (roleId === role.id || !member.roles.cache.has(roleId)) continue;
+
+        const roleToRemove = member.guild.roles.cache.get(roleId) ||
+            await member.guild.roles.fetch(roleId).catch(() => null);
+
+        if (!roleToRemove || !canBotAssignRole(botMember, member.guild, roleToRemove)) continue;
+
+        await member.roles.remove(roleToRemove, 'VRChat account verified.').catch(() => {});
+
+    }
+
+    return role;
+
+}
+
+async function sendVrcVerifyConfigSummary(message) {
+
+    const config = getVrcVerifyConfig(message.guild.id);
+    const embed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle('VRC Verifier Config')
+        .addFields(
+            {
+                name: 'Verified Role',
+                value: config.verifiedRoleId ? `<@&${config.verifiedRoleId}>` : 'None configured.',
+                inline: false
+            },
+            {
+                name: 'Remove After Verify',
+                value: config.removeRoleIds.length > 0
+                    ? config.removeRoleIds.map(roleId => `<@&${roleId}>`).join('\n')
+                    : 'None configured.',
+                inline: false
+            },
+            {
+                name: 'Logs',
+                value: config.logChannelId ? `<#${config.logChannelId}>` : `<#${LOG_CHANNEL_ID}>`,
+                inline: true
+            },
+            {
+                name: 'Auth',
+                value: VRCHAT_AUTH_COOKIE ? 'VRCHAT_AUTH_COOKIE is set.' : 'Missing VRCHAT_AUTH_COOKIE.',
+                inline: true
+            },
+            {
+                name: 'Commands',
+                value: getVrcVerifyConfigUsage(),
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+    await message.channel.send({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleVrcVerifyConfigCommand(message, args) {
+
+    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return message.reply('Administrator permission required.');
+    }
+
+    const section = args[0]?.toLowerCase();
+
+    if (!section || section === 'list' || section === 'show') {
+        await sendVrcVerifyConfigSummary(message);
+        return;
+    }
+
+    if (section === 'reset') {
+
+        vrcVerifyConfigs.set(message.guild.id, normalizeVrcVerifyConfig());
+        saveVrcVerifyConfigs();
+
+        await message.reply('VRC verifier config reset to defaults.');
+        return;
+
+    }
+
+    if (section === 'role' || section === 'verifiedrole') {
+
+        const role = await resolveRoleFromArg(message, args.slice(1).join(' ').trim());
+
+        if (!role) {
+            return message.reply('I could not find that role.');
+        }
+
+        setVrcVerifyConfig(message.guild.id, config => {
+            config.verifiedRoleId = role.id;
+        });
+
+        await message.reply(`VRC verified role set to ${role}.`);
+        return;
+
+    }
+
+    if (section === 'logs' || section === 'log') {
+
+        const channel = resolveTextChannelFromArg(message, args[1]);
+
+        if (!channel) {
+            return message.reply('Usage: `!vrcverifyconfig logs #channel`');
+        }
+
+        setVrcVerifyConfig(message.guild.id, config => {
+            config.logChannelId = channel.id;
+        });
+
+        await message.reply(`VRC verifier logs will be sent to ${channel}.`);
+        return;
+
+    }
+
+    if (section === 'remove') {
+
+        const action = args[1]?.toLowerCase();
+
+        if (action === 'clear') {
+
+            setVrcVerifyConfig(message.guild.id, config => {
+                config.removeRoleIds = [];
+            });
+
+            await message.reply('Cleared roles removed after VRC verification.');
+            return;
+
+        }
+
+        if (!['add', 'remove'].includes(action)) {
+            return message.reply(getVrcVerifyConfigUsage());
+        }
+
+        const role = await resolveRoleFromArg(message, args.slice(2).join(' ').trim());
+
+        if (!role) {
+            return message.reply('I could not find that role.');
+        }
+
+        setVrcVerifyConfig(message.guild.id, config => {
+
+            if (action === 'add') {
+                config.removeRoleIds = getUniqueIdList([
+                    ...config.removeRoleIds,
+                    role.id
+                ]);
+            } else {
+                config.removeRoleIds = config.removeRoleIds.filter(roleId => roleId !== role.id);
+            }
+
+        });
+
+        await message.reply(`${role} was ${action === 'add' ? 'added to' : 'removed from'} the remove-after-verify list.`);
+        return;
+
+    }
+
+    await message.reply(getVrcVerifyConfigUsage());
+
+}
+
+async function handleVrcVerifyStartCommand(message, args) {
+
+    const identifier = args.join(' ').trim();
+
+    if (!identifier) {
+        return message.reply('Usage: `!vrcverify VRChatDisplayName` or `!vrcverify https://vrchat.com/home/user/usr_...`');
+    }
+
+    const config = getVrcVerifyConfig(message.guild.id);
+
+    if (!config.verifiedRoleId) {
+        return message.reply('VRC verification is missing a verified role. Ask an admin to run `!vrcverifyconfig role @role`.');
+    }
+
+    const code = generateVrcVerifyCode();
+    const expiresAt = Date.now() + VRC_VERIFY_CODE_TTL_MS;
+
+    pendingVrcVerifications.set(getVrcVerifyKey(message.guild.id, message.author.id), {
+        guildId: message.guild.id,
+        discordUserId: message.author.id,
+        vrcIdentifier: identifier,
+        code,
+        expiresAt,
+        createdAt: Date.now()
+    });
+
+    const embed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle('VRChat Verification Started')
+        .setDescription('Put this code in your VRChat bio or status, then run `!vrcconfirm` in Discord.')
+        .addFields(
+            {
+                name: 'Verification Code',
+                value: `\`${code}\``,
+                inline: false
+            },
+            {
+                name: 'VRChat Profile',
+                value: identifier,
+                inline: false
+            },
+            {
+                name: 'Expires',
+                value: `<t:${Math.floor(expiresAt / 1000)}:R>`,
+                inline: true
+            }
+        )
+        .setFooter({
+            text: 'You can remove the code from your VRChat profile after verification.'
+        })
+        .setTimestamp();
+
+    await message.reply({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleVrcConfirmCommand(message, args) {
+
+    const pending = getPendingVrcVerification(message.guild.id, message.author.id);
+
+    if (!pending) {
+        return message.reply('No active VRC verification found. Start one with `!vrcverify VRChatDisplayName`.');
+    }
+
+    const identifier = args.join(' ').trim() || pending.vrcIdentifier;
+
+    if (!identifier) {
+        return message.reply('Usage: `!vrcconfirm VRChatDisplayName`');
+    }
+
+    const config = getVrcVerifyConfig(message.guild.id);
+    const statusMessage = await message.reply('Checking your VRChat profile...');
+
+    try {
+
+        const vrcUser = await resolveVrchatUser(identifier);
+
+        if (!vrcUser?.id) {
+            await statusMessage.edit('I could not find that VRChat profile.');
+            return;
+        }
+
+        if (!isVrchatUserAgeVerified18Plus(vrcUser)) {
+            await statusMessage.edit(
+                `I found **${vrcUser.displayName || 'that profile'}**, but that VRChat profile is not showing as **18+ age verified**.`
+            );
+
+            await sendVrcVerificationLog(
+                message.guild,
+                'VRC Verification Blocked',
+                [
+                    {
+                        name: 'Discord User',
+                        value: `${message.author.tag} (${message.author.id})`,
+                        inline: false
+                    },
+                    {
+                        name: 'VRChat User',
+                        value: `${vrcUser.displayName || 'Unknown'} (${vrcUser.id})`,
+                        inline: false
+                    },
+                    {
+                        name: 'Reason',
+                        value: `Profile is not showing 18+ age verification. ageVerified=${Boolean(vrcUser.ageVerified)}, ageVerificationStatus=${vrcUser.ageVerificationStatus || 'missing'}`,
+                        inline: false
+                    }
+                ],
+                '#ED4245',
+                config
+            );
+
+            return;
+        }
+
+        if (!vrcProfileContainsCode(vrcUser, pending.code)) {
+            await statusMessage.edit(
+                `I found **${vrcUser.displayName || 'that profile'}**, but I do not see \`${pending.code}\` in the bio or status yet.`
+            );
+            return;
+        }
+
+        const verifiedRole = await applyVrcVerifiedRole(message.member, config);
+        const record = normalizeVrcVerificationRecord({
+            guildId: message.guild.id,
+            discordUserId: message.author.id,
+            vrcUserId: vrcUser.id,
+            vrcDisplayName: vrcUser.displayName,
+            verifiedAt: new Date().toISOString()
+        });
+
+        if (record) {
+            vrcVerificationRecords.set(getVrcVerifyKey(message.guild.id, message.author.id), record);
+            saveVrcVerificationRecords();
+        }
+
+        pendingVrcVerifications.delete(getVrcVerifyKey(message.guild.id, message.author.id));
+
+        await statusMessage.edit(`Verified as **${vrcUser.displayName}** and gave you **${verifiedRole.name}**.`);
+
+        await sendVrcVerificationLog(
+            message.guild,
+            'VRC User Verified',
+            [
+                {
+                    name: 'Discord User',
+                    value: `${message.author.tag} (${message.author.id})`,
+                    inline: false
+                },
+                {
+                    name: 'VRChat User',
+                    value: `${vrcUser.displayName} (${vrcUser.id})`,
+                    inline: false
+                },
+                {
+                    name: 'Role',
+                    value: `${verifiedRole.name} (${verifiedRole.id})`,
+                    inline: false
+                }
+            ],
+            '#57F287',
+            config
+        );
+
+    } catch (error) {
+
+        console.error('VRC confirm command error:', error);
+        await statusMessage.edit(`VRC verification failed: ${truncateText(error.message, 300)}`).catch(() => {});
+
+    }
+
+}
+
+async function handleVrcLinkedCommand(message, args) {
+
+    const target = await resolveUserFromArgs(message, args) || message.author;
+    const record = vrcVerificationRecords.get(getVrcVerifyKey(message.guild.id, target.id));
+
+    if (!record) {
+        return message.reply(`${target} has not verified a VRChat account with this bot.`);
+    }
+
+    const embed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle('Linked VRChat Account')
+        .addFields(
+            {
+                name: 'Discord User',
+                value: `${target.tag || target.username} (${target.id})`,
+                inline: false
+            },
+            {
+                name: 'VRChat User',
+                value: `${record.vrcDisplayName} (${record.vrcUserId})`,
+                inline: false
+            },
+            {
+                name: 'Verified',
+                value: `<t:${Math.floor(Date.parse(record.verifiedAt) / 1000)}:R>`,
+                inline: true
+            }
+        )
+        .setTimestamp();
+
+    await message.channel.send({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleVrcUnverifyCommand(message, args) {
+
+    if (!hasModAccess(message.member)) {
+        return message.reply('No permission.');
+    }
+
+    const targetMember = await resolveMemberFromArgs(message, args);
+
+    if (!targetMember) {
+        return message.reply('Usage: `!vrcunverify @user/userID`');
+    }
+
+    const key = getVrcVerifyKey(message.guild.id, targetMember.id);
+    const record = vrcVerificationRecords.get(key);
+
+    if (!record) {
+        return message.reply('That user is not linked in the VRC verifier records.');
+    }
+
+    vrcVerificationRecords.delete(key);
+    saveVrcVerificationRecords();
+
+    const config = getVrcVerifyConfig(message.guild.id);
+
+    if (config.verifiedRoleId && targetMember.roles.cache.has(config.verifiedRoleId)) {
+        await targetMember.roles.remove(config.verifiedRoleId, 'VRC verification removed.').catch(() => {});
+    }
+
+    await message.reply(`Removed VRC verification for ${targetMember.user.tag}.`);
+
+    await sendVrcVerificationLog(
+        message.guild,
+        'VRC Verification Removed',
+        [
+            {
+                name: 'Discord User',
+                value: `${targetMember.user.tag} (${targetMember.id})`,
+                inline: false
+            },
+            {
+                name: 'Removed By',
+                value: `${message.author.tag} (${message.author.id})`,
+                inline: false
+            },
+            {
+                name: 'Former VRChat User',
+                value: `${record.vrcDisplayName} (${record.vrcUserId})`,
+                inline: false
+            }
+        ],
+        '#ED4245',
+        config
+    );
 
 }
 
@@ -4059,7 +4896,17 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 🔹 \`!reactionrole #channel emoji @role message\` - Creates a reaction role message.
 🔹 \`!reactionrole #channel message | emoji @role | emoji @role\` - Creates one message with multiple reaction roles.
 🔹 \`!vrchat\` / \`!vrc\` - Shows VRChat community info.
-🎫 \`!ticket [reason]\` - Opens a private support ticket.`
+🎫 \`!ticket [reason]\` - Opens a private support ticket.
+🔐 \`!vrcverify VRChatName\` - Starts VRChat account verification.`
+                },
+                {
+                    name: '🔐 VRC Verification Commands',
+                    value:
+`\`!vrcverify VRChatName\` - Starts profile-code verification.
+\`!vrcconfirm [VRChatName]\` - Checks your profile and gives the verified role.
+\`!vrclinked [@user/userID]\` - Shows a linked VRChat account.
+\`!vrcverifyconfig\` - Admin config for verified role and logs.
+\`!vrcunverify @user/userID\` - Removes a saved VRC verification.`
                 },
                 {
                     name: '🎫 Ticket Commands',
@@ -4140,6 +4987,35 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             embeds: [helpEmbed]
         });
 
+        return;
+    }
+
+    // ==========================================
+    // VRC VERIFICATION COMMANDS
+    // ==========================================
+
+    if (command === '!vrcverifyconfig' || command === '!vrcverifierconfig') {
+        await handleVrcVerifyConfigCommand(message, args);
+        return;
+    }
+
+    if (command === '!vrcverify' || command === '!verifyvrc') {
+        await handleVrcVerifyStartCommand(message, args);
+        return;
+    }
+
+    if (command === '!vrcconfirm' || command === '!confirmvrc') {
+        await handleVrcConfirmCommand(message, args);
+        return;
+    }
+
+    if (command === '!vrclinked' || command === '!vrcwhois') {
+        await handleVrcLinkedCommand(message, args);
+        return;
+    }
+
+    if (command === '!vrcunverify') {
+        await handleVrcUnverifyCommand(message, args);
         return;
     }
 
