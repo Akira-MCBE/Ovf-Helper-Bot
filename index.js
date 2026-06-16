@@ -2,6 +2,7 @@ const {
     Client,
     GatewayIntentBits,
     EmbedBuilder,
+    AttachmentBuilder,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
@@ -358,6 +359,46 @@ async function fetchVrchatGroupPosts() {
 
 }
 
+async function fetchVrchatGroupInstances() {
+
+    const response = await fetch(
+        `https://api.vrchat.cloud/api/1/groups/${encodeURIComponent(VRCHAT_GROUP_ID)}/instances`,
+        {
+            headers: {
+                Accept: 'application/json',
+                Cookie: getVrchatAuthCookieHeader(),
+                'User-Agent': VRCHAT_API_USER_AGENT
+            }
+        }
+    );
+
+    let payload = null;
+
+    try {
+        payload = await response.json();
+    } catch {
+        payload = null;
+    }
+
+    if (response.status === 429) {
+        const retryAfterSeconds = Number.parseInt(response.headers.get('retry-after') || '', 10);
+
+        if (retryAfterSeconds > 0) {
+            vrchatPostNextAllowedAt = Date.now() + (retryAfterSeconds * 1000);
+        }
+
+        throw new Error('VRChat rate limited the group instance watcher.');
+    }
+
+    if (!response.ok) {
+        const errorMessage = payload?.error?.message || payload?.message || response.statusText;
+        throw new Error(`VRChat instances API returned ${response.status}: ${errorMessage}`);
+    }
+
+    return Array.isArray(payload) ? payload : [];
+
+}
+
 async function getVrchatPostChannel() {
 
     const channel = client.channels.cache.get(VRCHAT_POST_CHANNEL_ID) ||
@@ -369,40 +410,109 @@ async function getVrchatPostChannel() {
 
 }
 
-function createVrchatPostEmbed(post) {
+function getVrchatInstanceWorldId(instance) {
+
+    if (instance?.world?.id) return instance.world.id;
+    if (typeof instance?.location === 'string' && instance.location.includes(':')) {
+        return instance.location.split(':')[0];
+    }
+
+    return '';
+
+}
+
+function getVrchatInstanceId(instance) {
+
+    if (instance?.instanceId) return instance.instanceId;
+    if (typeof instance?.location === 'string' && instance.location.includes(':')) {
+        return instance.location.slice(instance.location.indexOf(':') + 1);
+    }
+
+    return '';
+
+}
+
+function getVrchatInstanceLaunchUrl(instance) {
+
+    const worldId = getVrchatInstanceWorldId(instance);
+    const instanceId = getVrchatInstanceId(instance);
+
+    if (!worldId || !instanceId) return null;
+
+    return `https://vrchat.com/home/launch?worldId=${encodeURIComponent(worldId)}&instanceId=${encodeURIComponent(instanceId)}`;
+
+}
+
+function escapeMarkdownLinkText(text) {
+
+    return String(text || 'Open Instance')
+        .replace(/\\/g, '\\\\')
+        .replace(/\[/g, '\\[')
+        .replace(/\]/g, '\\]')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+}
+
+function formatVrchatOpenInstances(instances) {
+
+    const links = [];
+    const seenLocations = new Set();
+
+    for (const instance of instances) {
+
+        if (!instance?.location || seenLocations.has(instance.location)) continue;
+
+        const launchUrl = getVrchatInstanceLaunchUrl(instance);
+        if (!launchUrl) continue;
+
+        const name = escapeMarkdownLinkText(instance.world?.name || instance.location);
+        const memberCount = Number.parseInt(instance.memberCount, 10);
+        const capacity = Number.parseInt(instance.world?.capacity, 10);
+        const memberText = Number.isNaN(memberCount)
+            ? ''
+            : Number.isNaN(capacity)
+                ? ` - ${memberCount} online`
+                : ` - ${memberCount}/${capacity} online`;
+
+        links.push(`[${name}](${launchUrl})${memberText}`);
+        seenLocations.add(instance.location);
+
+        if (links.length >= 10) break;
+
+    }
+
+    return links.length > 0
+        ? `**Open Instances**\n${links.join('\n')}`
+        : '';
+
+}
+
+function buildVrchatPostDescription(post, openInstances = []) {
+
+    const postText = post.text || 'No post text was provided.';
+    const instanceSection = formatVrchatOpenInstances(openInstances);
+
+    if (!instanceSection) {
+        return truncateText(postText, 4096);
+    }
+
+    const availablePostTextLength = Math.max(200, 4096 - instanceSection.length - 2);
+
+    return `${truncateText(postText, availablePostTextLength)}\n\n${instanceSection}`;
+
+}
+
+function createVrchatPostEmbed(post, openInstances = []) {
 
     const title = truncateText(post.title || 'New VRChat Group Post', 250);
-    const description = truncateText(post.text || 'No post text was provided.', 3900);
+    const description = buildVrchatPostDescription(post, openInstances);
     const createdAt = Date.parse(post.createdAt || post.updatedAt || '');
 
     const embed = new EmbedBuilder()
         .setColor('#2B90D9')
         .setTitle(title)
-        .setDescription(description)
-        .addFields(
-            {
-                name: 'Group',
-                value: truncateText(post.groupId || VRCHAT_GROUP_ID, 100),
-                inline: true
-            },
-            {
-                name: 'Visibility',
-                value: truncateText(post.visibility || 'unknown', 100),
-                inline: true
-            }
-        );
-
-    if (post.authorId) {
-        embed.addFields({
-            name: 'Author ID',
-            value: truncateText(post.authorId, 100),
-            inline: true
-        });
-    }
-
-    if (post.imageUrl && /^https?:\/\//i.test(post.imageUrl)) {
-        embed.setImage(post.imageUrl);
-    }
+        .setDescription(description);
 
     if (!Number.isNaN(createdAt)) {
         embed.setTimestamp(new Date(createdAt));
@@ -412,7 +522,72 @@ function createVrchatPostEmbed(post) {
 
 }
 
-async function sendVrchatGroupPost(post) {
+function getVrchatPostImageName(post, contentType = '') {
+
+    const extensionFromType = contentType.includes('png')
+        ? 'png'
+        : contentType.includes('gif')
+            ? 'gif'
+            : contentType.includes('webp')
+                ? 'webp'
+                : 'jpg';
+
+    return `vrchat-post-${post.id || Date.now()}.${extensionFromType}`;
+
+}
+
+async function createVrchatPostMessagePayload(post, openInstances = []) {
+
+    const embed = createVrchatPostEmbed(post, openInstances);
+    const payload = {
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    };
+
+    if (!post.imageUrl || !/^https?:\/\//i.test(post.imageUrl)) {
+        return payload;
+    }
+
+    try {
+
+        const response = await fetch(post.imageUrl, {
+            headers: {
+                Accept: 'image/*',
+                Cookie: getVrchatAuthCookieHeader(),
+                'User-Agent': VRCHAT_API_USER_AGENT
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Image download returned ${response.status}`);
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        const imageBuffer = Buffer.from(await response.arrayBuffer());
+        const imageName = getVrchatPostImageName(post, contentType);
+
+        payload.files = [
+            new AttachmentBuilder(imageBuffer, {
+                name: imageName
+            })
+        ];
+
+        embed.setImage(`attachment://${imageName}`);
+
+    } catch (error) {
+
+        console.error('Failed to upload VRChat post image:', error);
+        embed.setImage(post.imageUrl);
+
+    }
+
+    return payload;
+
+}
+
+async function sendVrchatGroupPost(post, openInstances = []) {
 
     const channel = await getVrchatPostChannel();
 
@@ -421,12 +596,7 @@ async function sendVrchatGroupPost(post) {
         return;
     }
 
-    await channel.send({
-        embeds: [createVrchatPostEmbed(post)],
-        allowedMentions: {
-            parse: []
-        }
-    });
+    await channel.send(await createVrchatPostMessagePayload(post, openInstances));
 
 }
 
@@ -463,8 +633,20 @@ async function checkVrchatGroupPosts(seedOnly = false) {
             Date.parse(right.createdAt || right.updatedAt || '')
         );
 
+        let openInstances = [];
+
+        if (newPosts.length > 0) {
+
+            try {
+                openInstances = await fetchVrchatGroupInstances();
+            } catch (error) {
+                console.error('Failed to fetch VRChat group instances:', error);
+            }
+
+        }
+
         for (const post of newPosts) {
-            await sendVrchatGroupPost(post);
+            await sendVrchatGroupPost(post, openInstances);
         }
 
     } catch (error) {
