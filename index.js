@@ -62,6 +62,7 @@ const TICKET_CONFIG_FILE = path.join(process.cwd(), 'ticket-config.json');
 const TICKET_STORE_FILE = path.join(process.cwd(), 'tickets.json');
 const TICKET_TRANSCRIPT_FETCH_LIMIT = 100;
 const TICKET_CLOSE_DELETE_DELAY_MS = 5000;
+const DEFAULT_TICKET_CATEGORY_ID = '1447439654159908954';
 
 const MOD_ROLE_IDS = [
     '1447375395383935066',
@@ -373,11 +374,13 @@ function getUniqueIdList(values) {
 function normalizeTicketConfig(config = {}) {
 
     const hasSupportRoles = Object.prototype.hasOwnProperty.call(config, 'supportRoleIds');
+    const hasCategory = Object.prototype.hasOwnProperty.call(config, 'categoryId');
+    const categoryId = hasCategory ? config.categoryId : DEFAULT_TICKET_CATEGORY_ID;
 
     return {
         supportRoleIds: getUniqueIdList(hasSupportRoles ? config.supportRoleIds : MOD_ROLE_IDS),
         adminRoleIds: getUniqueIdList(config.adminRoleIds),
-        categoryId: /^\d{17,20}$/.test(String(config.categoryId || '')) ? String(config.categoryId) : null,
+        categoryId: /^\d{17,20}$/.test(String(categoryId || '')) ? String(categoryId) : null,
         logChannelId: /^\d{17,20}$/.test(String(config.logChannelId || '')) ? String(config.logChannelId) : LOG_CHANNEL_ID,
         nextTicketNumber: Math.max(1, Number.parseInt(config.nextTicketNumber || '1', 10) || 1)
     };
