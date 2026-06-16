@@ -2606,12 +2606,6 @@ client.on('messageCreate', async (message) => {
             .setColor(hasMultipleOptions ? '#2B90D9' : options[0].role.color || '#2B90D9')
             .setTitle(hasMultipleOptions ? 'Choose Your Roles' : 'Choose Your Role')
             .setDescription(promptText)
-            .addFields({
-                name: hasMultipleOptions ? 'Role Options' : 'Role',
-                value: hasMultipleOptions
-                    ? truncateText(getReactionRoleOptionText(options), 1024)
-                    : `React with ${options[0].emoji} to get ${options[0].role}.`
-            })
             .setFooter({
                 text: `Reaction role${hasMultipleOptions ? 's' : ''} created by ${message.author.tag}`
             })
