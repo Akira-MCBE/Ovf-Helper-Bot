@@ -3631,8 +3631,127 @@ async function syncMemberNicknameToVrc(member, vrcDisplayName) {
 
 }
 
+const GENERIC_SLASH_COMMAND_NAMES = [
+    '8ball',
+    'add',
+    'admin',
+    'appeal',
+    'ask',
+    'avatar',
+    'ban',
+    'choose',
+    'claim',
+    'close',
+    'closeticket',
+    'coinflip',
+    'compliment',
+    'config',
+    'confirmvrc',
+    'escalate',
+    'event',
+    'fact',
+    'help',
+    'inviteinfo',
+    'invites',
+    'joke',
+    'kick',
+    'leaderboard',
+    'leave',
+    'log',
+    'massdelete',
+    'mute',
+    'myinvites',
+    'new',
+    'note',
+    'notes',
+    'nowplaying',
+    'np',
+    'onboarding',
+    'openticket',
+    'pause',
+    'ping',
+    'play',
+    'purge',
+    'queue',
+    'rate',
+    'rateticket',
+    'reactionrole',
+    'reactionroles',
+    'remove',
+    'rename',
+    'resetwarnings',
+    'resetwarns',
+    'resume',
+    'roast',
+    'roll',
+    'rps',
+    'rr',
+    'rrmulti',
+    'rsvp',
+    'serverinfo',
+    'setup-roles',
+    'setup-ticket',
+    'ship',
+    'skip',
+    'stop',
+    'syncnick',
+    'syncnickname',
+    'ticketadd',
+    'ticketclose',
+    'ticketconfig',
+    'ticketpanel',
+    'ticketrating',
+    'ticketremove',
+    'ticketrename',
+    'ticketsconfig',
+    'ticketsetup',
+    'tickettranscript',
+    'timeout',
+    'transcript',
+    'unclaim',
+    'unmute',
+    'untimeout',
+    'userinfo',
+    'verifyvrc',
+    'volume',
+    'vrc',
+    'vrcevent',
+    'vrchat',
+    'vrclinked',
+    'vrcunverify',
+    'vrcverifierconfig',
+    'vrcverifyconfig',
+    'vrcwhois',
+    'warn',
+    'welcome-setup'
+];
+
+function createGenericSlashCommand(commandName) {
+
+    return {
+        name: commandName,
+        description: `Runs !${commandName}`,
+        options: [
+            {
+                name: 'args',
+                description: `Text after !${commandName}, if needed`,
+                type: ApplicationCommandOptionType.String,
+                required: false
+            }
+        ]
+    };
+
+}
+
 async function registerSlashCommandsForGuilds() {
 
+    const specialSlashCommandNames = new Set([
+        'ticket',
+        'vrcverify',
+        'vrcconfirm',
+        'addrole',
+        'removerole'
+    ]);
     const slashCommands = [
         {
             name: 'ticket',
@@ -3670,7 +3789,15 @@ async function registerSlashCommandsForGuilds() {
         },
         {
             name: 'vrcconfirm',
-            description: 'Confirm VRChat verification'
+            description: 'Confirm VRChat verification',
+            options: [
+                {
+                    name: 'profile',
+                    description: 'Optional VRChat display name or profile URL',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                }
+            ]
         },
         {
             name: 'addrole',
@@ -3708,7 +3835,11 @@ async function registerSlashCommandsForGuilds() {
                 }
             ]
         }
-    ];
+    ].concat(
+        GENERIC_SLASH_COMMAND_NAMES
+            .filter(commandName => !specialSlashCommandNames.has(commandName))
+            .map(createGenericSlashCommand)
+    );
 
     for (const guild of client.guilds.cache.values()) {
         await guild.commands.set(slashCommands).catch(error => {
@@ -3747,7 +3878,10 @@ async function handleSlashCommand(interaction) {
     }
 
     if (interaction.commandName === 'vrcconfirm') {
-        return handleVrcConfirmCommand(createMessageLikeInteraction(interaction, member), []);
+        return handleVrcConfirmCommand(
+            createMessageLikeInteraction(interaction, member),
+            interaction.options.getString('profile') ? [interaction.options.getString('profile')] : []
+        );
     }
 
     if (interaction.commandName === 'addrole' || interaction.commandName === 'removerole') {
@@ -3755,6 +3889,8 @@ async function handleSlashCommand(interaction) {
         const role = interaction.options.getRole('role');
         return handleRoleSlashCommand(interaction, member, targetMember, role, interaction.commandName === 'addrole');
     }
+
+    return handleGenericSlashCommand(interaction, member);
 
 }
 
@@ -3835,6 +3971,109 @@ async function handleRoleSlashCommand(interaction, actingMember, targetMember, r
         content: `${shouldAddRole ? 'Added' : 'Removed'} **${role.name}** ${shouldAddRole ? 'to' : 'from'} ${targetMember}.`,
         ephemeral: true
     });
+
+}
+
+async function handleGenericSlashCommand(interaction, member) {
+
+    const argsText = interaction.options.getString('args') || '';
+    const commandContent = `!${interaction.commandName}${argsText ? ` ${argsText}` : ''}`;
+
+    await interaction.deferReply({
+        ephemeral: true
+    });
+
+    let replyCount = 0;
+    const fakeMessage = {
+        id: interaction.id,
+        content: commandContent,
+        author: interaction.user,
+        member,
+        guild: interaction.guild,
+        channel: interaction.channel,
+        client,
+        webhookId: null,
+        createdTimestamp: Date.now(),
+        mentions: {
+            users: {
+                first: () => null,
+                values: () => [][Symbol.iterator]()
+            },
+            members: {
+                first: () => null
+            },
+            channels: {
+                first: () => null
+            }
+        },
+        delete: async () => {},
+        reply: async (payload) => {
+
+            replyCount++;
+
+            const responsePayload = typeof payload === 'string'
+                ? {
+                    content: payload
+                }
+                : payload;
+
+            if (replyCount === 1) {
+
+                await interaction.editReply(responsePayload).catch(() => {});
+
+                return {
+                    id: interaction.id,
+                    createdTimestamp: Date.now(),
+                    edit: async (editPayload) => interaction.editReply(
+                        typeof editPayload === 'string'
+                            ? {
+                                content: editPayload
+                            }
+                            : editPayload
+                    ).catch(() => {})
+                };
+
+            }
+
+            const followUpMessage = await interaction.followUp({
+                ...responsePayload,
+                ephemeral: true,
+                fetchReply: true
+            }).catch(() => null);
+
+            return followUpMessage || {
+                id: interaction.id,
+                createdTimestamp: Date.now(),
+                edit: async () => {}
+            };
+
+        }
+    };
+
+    try {
+
+        await handleMessageCreate(fakeMessage);
+
+        if (replyCount === 0) {
+            await interaction.editReply(`Ran \`/${interaction.commandName}\`.`).catch(() => {});
+        }
+
+    } catch (error) {
+
+        console.error(`Slash command bridge failed for /${interaction.commandName}:`, error);
+
+        const errorMessage = `Command failed: ${truncateText(error.message, 300)}`;
+
+        if (replyCount === 0) {
+            await interaction.editReply(errorMessage).catch(() => {});
+        } else {
+            await interaction.followUp({
+                content: errorMessage,
+                ephemeral: true
+            }).catch(() => {});
+        }
+
+    }
 
 }
 
@@ -5826,7 +6065,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 // MESSAGE COMMANDS
 // ==========================================
 
-client.on('messageCreate', async (message) => {
+async function handleMessageCreate(message) {
 
     if (message.author.bot || message.webhookId) return;
     if (!message.guild) return;
@@ -7964,7 +8203,9 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     }
 
-});
+}
+
+client.on('messageCreate', handleMessageCreate);
 
 // ==========================================
 // REACTION ROLE HANDLERS
