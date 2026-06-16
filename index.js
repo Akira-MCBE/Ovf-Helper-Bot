@@ -73,11 +73,20 @@ const DEFAULT_VRC_VERIFIED_ROLE_ID = process.env.VRC_VERIFIED_ROLE_ID || REACTIO
 const APP_CONFIG_FILE = path.join(process.cwd(), 'community-config.json');
 const STAFF_NOTES_FILE = path.join(process.cwd(), 'staff-notes.json');
 const VRCHAT_EVENTS_FILE = path.join(process.cwd(), 'vrchat-events.json');
+const CASES_FILE = path.join(process.cwd(), 'cases.json');
+const TEMP_ROLES_FILE = path.join(process.cwd(), 'temp-roles.json');
+const GIVEAWAYS_FILE = path.join(process.cwd(), 'giveaways.json');
+const POLLS_FILE = path.join(process.cwd(), 'polls.json');
+const XP_FILE = path.join(process.cwd(), 'xp.json');
+const SUGGESTIONS_FILE = path.join(process.cwd(), 'suggestions.json');
 const ANTI_RAID_JOIN_WINDOW_MS = 60 * 1000;
 const ANTI_RAID_JOIN_LIMIT = 5;
 const ANTI_RAID_MESSAGE_WINDOW_MS = 10 * 1000;
 const ANTI_RAID_MESSAGE_LIMIT = 6;
 const ANTI_RAID_REPEAT_LIMIT = 3;
+const XP_COOLDOWN_MS = 60 * 1000;
+const EVENT_REMINDER_INTERVAL_MS = 60 * 1000;
+const EVENT_REMINDER_BEFORE_MS = 60 * 60 * 1000;
 
 const DEFAULT_TICKET_TYPES = [
     {
@@ -191,8 +200,16 @@ const pendingVrcVerifications = new Map();
 const appConfigs = new Map();
 const staffNotes = new Map();
 const vrchatEvents = new Map();
+const caseStores = new Map();
+const tempRoles = new Map();
+const giveaways = new Map();
+const polls = new Map();
+const xpRecords = new Map();
+const suggestions = new Map();
+const xpCooldowns = new Map();
 const antiRaidJoinTimestamps = new Map();
 const antiRaidMessageTimestamps = new Map();
+let eventReminderInterval = null;
 
 // VRChat group post watcher state
 const seenVrchatPostIds = new Set();
@@ -250,6 +267,12 @@ client.once('clientReady', async () => {
     loadAppConfigs();
     loadStaffNotes();
     loadVrchatEvents();
+    loadCases();
+    loadTempRoles();
+    loadGiveaways();
+    loadPolls();
+    loadXpRecords();
+    loadSuggestions();
 
     client.user.setPresence({
     activities: [
@@ -286,6 +309,9 @@ client.once('clientReady', async () => {
     }
 
     startVrchatGroupPostWatcher();
+    scheduleTempRoleRemovals();
+    scheduleGiveawayEnds();
+    startEventReminderWorker();
     registerSlashCommandsForGuilds();
 
 });
@@ -1291,6 +1317,20 @@ async function closeTicketChannel(channel, actorUser, reason = 'No reason provid
     record.status = 'closed';
     ticketRecords.delete(channel.id);
     saveTicketRecords();
+
+    await createCase(
+        channel.guild,
+        'TICKET_CLOSE',
+        record.ownerId,
+        actorUser,
+        reason,
+        {
+            ticketChannelId: channel.id,
+            ticketNumber: record.ticketNumber,
+            ticketType: record.ticketType,
+            rating: record.rating || null
+        }
+    );
 
     await channel.send(
         `Transcript saved to ${transcriptResult.logChannel}. Closing this ticket in ${TICKET_CLOSE_DELETE_DELAY_MS / 1000} seconds.`
@@ -2979,7 +3019,11 @@ function normalizeAppConfig(config = {}) {
         eventChannelId: /^\d{17,20}$/.test(String(config.eventChannelId || '')) ? String(config.eventChannelId) : VRCHAT_POST_CHANNEL_ID,
         notesLogChannelId: /^\d{17,20}$/.test(String(config.notesLogChannelId || '')) ? String(config.notesLogChannelId) : LOG_CHANNEL_ID,
         antiRaidEnabled: config.antiRaidEnabled !== false,
-        nicknameSyncEnabled: config.nicknameSyncEnabled !== false
+        nicknameSyncEnabled: config.nicknameSyncEnabled !== false,
+        automodEnabled: config.automodEnabled !== false,
+        blockedWords: Array.isArray(config.blockedWords)
+            ? config.blockedWords.map(word => String(word || '').toLowerCase().trim()).filter(Boolean)
+            : []
     };
 
 }
@@ -3256,6 +3300,7 @@ async function handleNoteCommand(message, args) {
     notes.push(note);
     staffNotes.set(key, notes);
     saveStaffNotes();
+    await createCase(message.guild, 'NOTE', targetUser.id, message.author, noteText);
 
     await message.reply(`Saved note **${note.id}** for ${targetUser.tag}.`);
 
@@ -3603,7 +3648,7 @@ async function handleCommunityConfigCommand(message, args) {
                     },
                     {
                         name: 'Systems',
-                        value: `Anti-raid: ${appConfig.antiRaidEnabled ? 'on' : 'off'}\nNickname sync: ${appConfig.nicknameSyncEnabled ? 'on' : 'off'}`,
+                        value: `Anti-raid: ${appConfig.antiRaidEnabled ? 'on' : 'off'}\nAutoMod: ${appConfig.automodEnabled ? 'on' : 'off'}\nNickname sync: ${appConfig.nicknameSyncEnabled ? 'on' : 'off'}`,
                         inline: false
                     }
                 )
@@ -3634,22 +3679,24 @@ async function syncMemberNicknameToVrc(member, vrcDisplayName) {
 const GENERIC_SLASH_COMMAND_NAMES = [
     '8ball',
     'add',
-    'admin',
     'appeal',
     'ask',
     'avatar',
     'ban',
+    'case',
+    'cases',
     'choose',
     'claim',
     'close',
-    'closeticket',
     'coinflip',
     'compliment',
     'config',
-    'confirmvrc',
+    'automod',
+    'editcase',
     'escalate',
     'event',
     'fact',
+    'giveaway',
     'help',
     'inviteinfo',
     'invites',
@@ -3661,69 +3708,54 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'massdelete',
     'mute',
     'myinvites',
-    'new',
     'note',
     'notes',
     'nowplaying',
-    'np',
     'onboarding',
-    'openticket',
     'pause',
     'ping',
     'play',
+    'poll',
+    'profile',
     'purge',
     'queue',
     'rate',
     'rateticket',
     'reactionrole',
-    'reactionroles',
     'remove',
+    'reopen',
     'rename',
-    'resetwarnings',
     'resetwarns',
     'resume',
     'roast',
     'roll',
     'rps',
-    'rr',
-    'rrmulti',
     'rsvp',
+    'rank',
     'serverinfo',
     'setup-roles',
-    'setup-ticket',
     'ship',
     'skip',
+    'staffapply',
+    'staffpanel',
     'stop',
+    'suggest',
     'syncnick',
-    'syncnickname',
-    'ticketadd',
-    'ticketclose',
+    'temprole',
     'ticketconfig',
-    'ticketpanel',
-    'ticketrating',
-    'ticketremove',
-    'ticketrename',
-    'ticketsconfig',
     'ticketsetup',
-    'tickettranscript',
     'timeout',
     'transcript',
     'unclaim',
     'unmute',
     'untimeout',
     'userinfo',
-    'verifyvrc',
     'volume',
-    'vrc',
-    'vrcevent',
     'vrchat',
     'vrclinked',
     'vrcunverify',
-    'vrcverifierconfig',
     'vrcverifyconfig',
-    'vrcwhois',
-    'warn',
-    'welcome-setup'
+    'warn'
 ];
 
 function createGenericSlashCommand(commandName) {
@@ -3963,8 +3995,10 @@ async function handleRoleSlashCommand(interaction, actingMember, targetMember, r
 
     if (shouldAddRole) {
         await targetMember.roles.add(role, `Role added by ${interaction.user.tag}`);
+        await createCase(interaction.guild, 'ROLE_ADD', targetMember.id, interaction.user, `Added role ${role.name}.`);
     } else {
         await targetMember.roles.remove(role, `Role removed by ${interaction.user.tag}`);
+        await createCase(interaction.guild, 'ROLE_REMOVE', targetMember.id, interaction.user, `Removed role ${role.name}.`);
     }
 
     await interaction.reply({
@@ -4072,6 +4106,1127 @@ async function handleGenericSlashCommand(interaction, member) {
                 ephemeral: true
             }).catch(() => {});
         }
+
+    }
+
+}
+
+function readJsonArrayFile(filePath) {
+
+    if (!fs.existsSync(filePath)) return [];
+
+    try {
+        const payload = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return Array.isArray(payload) ? payload : [];
+    } catch (error) {
+        console.error(`Failed to read ${filePath}:`, error);
+        return [];
+    }
+
+}
+
+function writeJsonArrayFile(filePath, values) {
+
+    try {
+        fs.writeFileSync(filePath, JSON.stringify(values, null, 2));
+    } catch (error) {
+        console.error(`Failed to write ${filePath}:`, error);
+    }
+
+}
+
+function getGuildCaseStore(guildId) {
+
+    if (!caseStores.has(guildId)) {
+        caseStores.set(guildId, {
+            nextCaseId: 1,
+            cases: []
+        });
+    }
+
+    return caseStores.get(guildId);
+
+}
+
+function loadCases() {
+
+    const records = readJsonArrayFile(CASES_FILE);
+    caseStores.clear();
+
+    for (const record of records) {
+
+        if (!record?.guildId || !record?.caseId) continue;
+
+        const store = getGuildCaseStore(record.guildId);
+        store.cases.push(record);
+        store.nextCaseId = Math.max(store.nextCaseId, Number(record.caseId) + 1);
+
+    }
+
+}
+
+function saveCases() {
+    writeJsonArrayFile(CASES_FILE, [...caseStores.values()].flatMap(store => store.cases));
+}
+
+function createCaseEmbed(caseRecord, guild) {
+
+    return new EmbedBuilder()
+        .setColor('#5865F2')
+        .setTitle(`Case #${caseRecord.caseId} - ${caseRecord.type}`)
+        .addFields(
+            {
+                name: 'Target',
+                value: caseRecord.targetUserId ? `<@${caseRecord.targetUserId}> (${caseRecord.targetUserId})` : 'None',
+                inline: false
+            },
+            {
+                name: 'Moderator/System',
+                value: `${caseRecord.moderatorTag || caseRecord.moderatorId} (${caseRecord.moderatorId})`,
+                inline: false
+            },
+            {
+                name: 'Reason',
+                value: truncateText(caseRecord.reason || 'No reason provided.', 1000),
+                inline: false
+            },
+            ...(caseRecord.ticketChannelId ? [
+                {
+                    name: 'Ticket Channel ID',
+                    value: caseRecord.ticketChannelId,
+                    inline: true
+                }
+            ] : [])
+        )
+        .setFooter({
+            text: guild?.name || 'Case Log'
+        })
+        .setTimestamp(new Date(caseRecord.createdAt));
+
+}
+
+async function createCase(guild, type, targetUserId, moderatorUser, reason = 'No reason provided.', extra = {}) {
+
+    const store = getGuildCaseStore(guild.id);
+    const caseRecord = {
+        guildId: guild.id,
+        caseId: store.nextCaseId++,
+        type,
+        targetUserId: targetUserId || null,
+        moderatorId: moderatorUser?.id || client.user.id,
+        moderatorTag: moderatorUser?.tag || moderatorUser?.username || client.user.username,
+        reason,
+        createdAt: new Date().toISOString(),
+        editedAt: null,
+        ...extra
+    };
+
+    store.cases.push(caseRecord);
+    saveCases();
+
+    const logChannel = getLogChannel(guild);
+
+    if (logChannel) {
+        logChannel.send({
+            embeds: [createCaseEmbed(caseRecord, guild)]
+        }).catch(() => {});
+    }
+
+    return caseRecord;
+
+}
+
+function findCase(guildId, caseId) {
+    return getGuildCaseStore(guildId).cases.find(caseRecord => String(caseRecord.caseId) === String(caseId)) || null;
+}
+
+async function handleCaseCommand(message, args) {
+
+    if (!hasModAccess(message.member)) return message.reply('No permission.');
+
+    const caseRecord = findCase(message.guild.id, args[0]);
+
+    if (!caseRecord) return message.reply('I could not find that case ID.');
+
+    await message.channel.send({
+        embeds: [createCaseEmbed(caseRecord, message.guild)],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleCasesCommand(message, args) {
+
+    if (!hasModAccess(message.member)) return message.reply('No permission.');
+
+    const targetUser = await resolveUserFromArgs(message, args);
+
+    if (!targetUser) return message.reply('Usage: `!cases @user/userID`');
+
+    const cases = getGuildCaseStore(message.guild.id).cases
+        .filter(caseRecord => caseRecord.targetUserId === targetUser.id)
+        .slice(-10);
+
+    if (!cases.length) return message.reply(`No cases found for ${targetUser.tag}.`);
+
+    await message.channel.send({
+        embeds: [
+            new EmbedBuilder()
+                .setColor('#5865F2')
+                .setTitle(`Cases for ${targetUser.tag}`)
+                .setDescription(cases.map(caseRecord =>
+                    `**#${caseRecord.caseId}** ${caseRecord.type} - <t:${Math.floor(Date.parse(caseRecord.createdAt) / 1000)}:R>\n${truncateText(caseRecord.reason, 220)}`
+                ).join('\n\n'))
+                .setTimestamp()
+        ],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleEditCaseCommand(message, args) {
+
+    if (!hasModAccess(message.member)) return message.reply('No permission.');
+
+    const caseRecord = findCase(message.guild.id, args[0]);
+    const reason = args.slice(1).join(' ').trim();
+
+    if (!caseRecord || !reason) return message.reply('Usage: `!editcase caseId new reason`');
+
+    caseRecord.reason = reason;
+    caseRecord.editedAt = new Date().toISOString();
+    caseRecord.editedBy = message.author.id;
+    saveCases();
+
+    await message.reply(`Updated case **#${caseRecord.caseId}**.`);
+
+}
+
+function parseDurationMs(input) {
+
+    const match = String(input || '').trim().match(/^(\d+)(s|m|h|d|w)$/i);
+
+    if (!match) return null;
+
+    const amount = Number.parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    const multipliers = {
+        s: 1000,
+        m: 60 * 1000,
+        h: 60 * 60 * 1000,
+        d: 24 * 60 * 60 * 1000,
+        w: 7 * 24 * 60 * 60 * 1000
+    };
+
+    return amount * multipliers[unit];
+
+}
+
+function formatDurationFromMs(ms) {
+
+    if (ms >= 7 * 24 * 60 * 60 * 1000 && ms % (7 * 24 * 60 * 60 * 1000) === 0) return `${ms / (7 * 24 * 60 * 60 * 1000)}w`;
+    if (ms >= 24 * 60 * 60 * 1000 && ms % (24 * 60 * 60 * 1000) === 0) return `${ms / (24 * 60 * 60 * 1000)}d`;
+    if (ms >= 60 * 60 * 1000 && ms % (60 * 60 * 1000) === 0) return `${ms / (60 * 60 * 1000)}h`;
+    if (ms >= 60 * 1000 && ms % (60 * 1000) === 0) return `${ms / (60 * 1000)}m`;
+    return `${Math.round(ms / 1000)}s`;
+
+}
+
+function loadTempRoles() {
+
+    tempRoles.clear();
+
+    for (const record of readJsonArrayFile(TEMP_ROLES_FILE)) {
+        if (record?.guildId && record?.userId && record?.roleId && record?.expiresAt) {
+            tempRoles.set(record.id || `${record.guildId}:${record.userId}:${record.roleId}:${record.expiresAt}`, record);
+        }
+    }
+
+}
+
+function saveTempRoles() {
+    writeJsonArrayFile(TEMP_ROLES_FILE, [...tempRoles.values()]);
+}
+
+function scheduleTempRoleRemovals() {
+
+    for (const record of tempRoles.values()) {
+        scheduleTempRoleRemoval(record);
+    }
+
+}
+
+function scheduleTempRoleRemoval(record) {
+
+    const delay = Math.max(1000, Date.parse(record.expiresAt) - Date.now());
+
+    setTimeout(() => {
+        removeExpiredTempRole(record.id).catch(error => console.error('Temp role removal failed:', error));
+    }, Math.min(delay, 2 ** 31 - 1));
+
+}
+
+async function removeExpiredTempRole(recordId) {
+
+    const record = tempRoles.get(recordId);
+
+    if (!record) return;
+
+    if (Date.parse(record.expiresAt) > Date.now() + 1000) {
+        scheduleTempRoleRemoval(record);
+        return;
+    }
+
+    const guild = client.guilds.cache.get(record.guildId);
+    const member = guild ? await guild.members.fetch(record.userId).catch(() => null) : null;
+
+    if (member?.roles.cache.has(record.roleId)) {
+        await member.roles.remove(record.roleId, 'Temporary role expired.').catch(() => {});
+    }
+
+    tempRoles.delete(recordId);
+    saveTempRoles();
+
+}
+
+async function handleTempRoleCommand(message, args) {
+
+    if (!hasServerAdminOrOwnerAccess(message.member)) return message.reply('No permission. Only server admins or the server owner can use this command.');
+
+    const target = await resolveMemberFromArgs(message, args);
+    const durationMs = parseDurationMs(args[args.length - 1]);
+    const role = await resolveRoleFromArg(message, args.slice(1, -1).join(' '));
+
+    if (!target || !role || !durationMs) return message.reply('Usage: `!temprole @user/userID @role 7d`');
+
+    const botMember = await getBotMember(message.guild);
+
+    if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageRoles) || !canBotAssignRole(botMember, message.guild, role)) {
+        return message.reply('I cannot manage that role. Check my Manage Roles permission and role position.');
+    }
+
+    await target.roles.add(role, `Temporary role added by ${message.author.tag}`);
+
+    const record = {
+        id: crypto.randomBytes(5).toString('hex'),
+        guildId: message.guild.id,
+        userId: target.id,
+        roleId: role.id,
+        addedBy: message.author.id,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + durationMs).toISOString()
+    };
+
+    tempRoles.set(record.id, record);
+    saveTempRoles();
+    scheduleTempRoleRemoval(record);
+
+    await createCase(message.guild, 'TEMP_ROLE', target.id, message.author, `Added ${role.name} for ${formatDurationFromMs(durationMs)}.`);
+    await message.reply(`Added **${role.name}** to ${target} for **${formatDurationFromMs(durationMs)}**.`);
+
+}
+
+function loadGiveaways() {
+
+    giveaways.clear();
+
+    for (const record of readJsonArrayFile(GIVEAWAYS_FILE)) {
+        if (record?.guildId && record?.id) giveaways.set(`${record.guildId}:${record.id}`, record);
+    }
+
+}
+
+function saveGiveaways() {
+    writeJsonArrayFile(GIVEAWAYS_FILE, [...giveaways.values()]);
+}
+
+function scheduleGiveawayEnds() {
+
+    for (const record of giveaways.values()) {
+        if (!record.ended) scheduleGiveawayEnd(record);
+    }
+
+}
+
+function scheduleGiveawayEnd(record) {
+
+    const delay = Math.max(1000, Date.parse(record.endsAt) - Date.now());
+
+    setTimeout(() => {
+        endGiveaway(record.guildId, record.id).catch(error => console.error('Giveaway end failed:', error));
+    }, Math.min(delay, 2 ** 31 - 1));
+
+}
+
+function createGiveawayEmbed(record) {
+
+    return new EmbedBuilder()
+        .setColor(record.ended ? '#ED4245' : '#57F287')
+        .setTitle(record.ended ? `Giveaway Ended: ${record.prize}` : `Giveaway: ${record.prize}`)
+        .setDescription(record.ended ? 'This giveaway has ended.' : 'Click Enter Giveaway to join.')
+        .addFields(
+            {
+                name: 'Ends',
+                value: `<t:${Math.floor(Date.parse(record.endsAt) / 1000)}:R>`,
+                inline: true
+            },
+            {
+                name: 'Winners',
+                value: `${record.winnerCount}`,
+                inline: true
+            },
+            {
+                name: 'Entries',
+                value: `${record.entries?.length || 0}`,
+                inline: true
+            }
+        )
+        .setFooter({
+            text: `Giveaway ID: ${record.id}`
+        })
+        .setTimestamp();
+
+}
+
+function createGiveawayRow(record) {
+
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`giveaway_join:${record.id}`)
+            .setLabel(record.ended ? 'Ended' : 'Enter Giveaway')
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(Boolean(record.ended))
+    );
+
+}
+
+function pickGiveawayWinners(record) {
+
+    const entries = [...new Set(record.entries || [])].sort(() => Math.random() - 0.5);
+
+    return entries.slice(0, Math.min(record.winnerCount || 1, entries.length));
+
+}
+
+async function endGiveaway(guildId, giveawayId) {
+
+    const record = giveaways.get(`${guildId}:${giveawayId}`);
+
+    if (!record || record.ended) return;
+
+    record.ended = true;
+    record.winners = pickGiveawayWinners(record);
+    giveaways.set(`${guildId}:${giveawayId}`, record);
+    saveGiveaways();
+
+    const guild = client.guilds.cache.get(guildId);
+    const channel = guild?.channels.cache.get(record.channelId) ||
+        await guild?.channels.fetch(record.channelId).catch(() => null);
+
+    if (channel?.isTextBased?.()) {
+        const giveawayMessage = await channel.messages.fetch(record.messageId).catch(() => null);
+        await giveawayMessage?.edit({
+            embeds: [createGiveawayEmbed(record)],
+            components: [createGiveawayRow(record)]
+        }).catch(() => {});
+        await channel.send(`Giveaway ended: **${record.prize}**\nWinner(s): ${record.winners.length ? record.winners.map(userId => `<@${userId}>`).join(', ') : 'No valid entries.'}`).catch(() => {});
+    }
+
+}
+
+async function handleGiveawayCommand(message, args) {
+
+    const subcommand = args.shift()?.toLowerCase();
+
+    if (subcommand === 'create') {
+
+        if (!hasModAccess(message.member)) return message.reply('No permission.');
+
+        const [prize, durationText, winnerText] = args.join(' ').split('|').map(part => part?.trim());
+        const durationMs = parseDurationMs(durationText);
+        const winnerCount = Math.max(1, Number.parseInt(winnerText || '1', 10) || 1);
+
+        if (!prize || !durationMs) return message.reply('Usage: `!giveaway create prize | 1d | winners`');
+
+        const record = {
+            id: crypto.randomBytes(3).toString('hex'),
+            guildId: message.guild.id,
+            channelId: message.channel.id,
+            messageId: null,
+            prize,
+            winnerCount,
+            entries: [],
+            winners: [],
+            ended: false,
+            createdBy: message.author.id,
+            createdAt: new Date().toISOString(),
+            endsAt: new Date(Date.now() + durationMs).toISOString()
+        };
+
+        const giveawayMessage = await message.channel.send({
+            embeds: [createGiveawayEmbed(record)],
+            components: [createGiveawayRow(record)]
+        });
+
+        record.messageId = giveawayMessage.id;
+        giveaways.set(`${message.guild.id}:${record.id}`, record);
+        saveGiveaways();
+        scheduleGiveawayEnd(record);
+        await message.reply(`Giveaway **${record.id}** created.`);
+        return;
+
+    }
+
+    if (subcommand === 'end') {
+        if (!hasModAccess(message.member)) return message.reply('No permission.');
+        await endGiveaway(message.guild.id, args[0]);
+        return message.reply('Giveaway ended.');
+    }
+
+    if (subcommand === 'reroll') {
+        if (!hasModAccess(message.member)) return message.reply('No permission.');
+        const record = giveaways.get(`${message.guild.id}:${args[0]}`);
+        if (!record || !record.ended) return message.reply('I could not find an ended giveaway with that ID.');
+        const winners = pickGiveawayWinners(record);
+        record.winners = winners;
+        saveGiveaways();
+        return message.channel.send(`Rerolled **${record.prize}** winner(s): ${winners.length ? winners.map(userId => `<@${userId}>`).join(', ') : 'No valid entries.'}`);
+    }
+
+    await message.reply('Usage: `!giveaway create prize | 1d | winners`, `!giveaway end id`, or `!giveaway reroll id`');
+
+}
+
+async function handleGiveawayButton(interaction) {
+
+    const giveawayId = interaction.customId.split(':')[1];
+    const record = giveaways.get(`${interaction.guild.id}:${giveawayId}`);
+
+    if (!record || record.ended) {
+        return interaction.reply({
+            content: 'This giveaway is not active.',
+            ephemeral: true
+        });
+    }
+
+    record.entries = record.entries || [];
+
+    if (record.entries.includes(interaction.user.id)) {
+        return interaction.reply({
+            content: 'You are already entered.',
+            ephemeral: true
+        });
+    }
+
+    record.entries.push(interaction.user.id);
+    giveaways.set(`${interaction.guild.id}:${record.id}`, record);
+    saveGiveaways();
+
+    await interaction.reply({
+        content: `You entered **${record.prize}**.`,
+        ephemeral: true
+    });
+
+    const giveawayMessage = await interaction.channel.messages.fetch(record.messageId).catch(() => null);
+    await giveawayMessage?.edit({
+        embeds: [createGiveawayEmbed(record)],
+        components: [createGiveawayRow(record)]
+    }).catch(() => {});
+
+}
+
+function loadPolls() {
+
+    polls.clear();
+
+    for (const record of readJsonArrayFile(POLLS_FILE)) {
+        if (record?.guildId && record?.id) polls.set(`${record.guildId}:${record.id}`, record);
+    }
+
+}
+
+function savePolls() {
+    writeJsonArrayFile(POLLS_FILE, [...polls.values()]);
+}
+
+function createPollEmbed(record) {
+
+    return new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle(record.question)
+        .setDescription(record.options.map((option, index) => {
+            const votes = Object.values(record.votes || {}).filter(vote => vote === index).length;
+            return `**${index + 1}.** ${option} - ${votes} vote(s)`;
+        }).join('\n'))
+        .setFooter({
+            text: `Poll ID: ${record.id}`
+        })
+        .setTimestamp();
+
+}
+
+function createPollRows(record) {
+
+    const buttons = record.options.map((option, index) =>
+        new ButtonBuilder()
+            .setCustomId(`poll_vote:${record.id}:${index}`)
+            .setLabel(String(index + 1))
+            .setStyle(ButtonStyle.Primary)
+    );
+    const rows = [];
+
+    for (let i = 0; i < buttons.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(...buttons.slice(i, i + 5)));
+    }
+
+    return rows;
+
+}
+
+async function handlePollCommand(message, args) {
+
+    const parts = args.join(' ').split('|').map(part => part.trim()).filter(Boolean);
+    const question = parts.shift();
+
+    if (!question || parts.length < 2 || parts.length > 10) {
+        return message.reply('Usage: `!poll question | option 1 | option 2`');
+    }
+
+    const record = {
+        id: crypto.randomBytes(3).toString('hex'),
+        guildId: message.guild.id,
+        channelId: message.channel.id,
+        messageId: null,
+        question,
+        options: parts,
+        votes: {},
+        createdBy: message.author.id,
+        createdAt: new Date().toISOString()
+    };
+
+    const pollMessage = await message.channel.send({
+        embeds: [createPollEmbed(record)],
+        components: createPollRows(record)
+    });
+
+    record.messageId = pollMessage.id;
+    polls.set(`${message.guild.id}:${record.id}`, record);
+    savePolls();
+    await message.reply(`Poll **${record.id}** created.`);
+
+}
+
+async function handlePollButton(interaction) {
+
+    const [, pollId, optionIndexText] = interaction.customId.split(':');
+    const record = polls.get(`${interaction.guild.id}:${pollId}`);
+    const optionIndex = Number.parseInt(optionIndexText, 10);
+
+    if (!record || !record.options[optionIndex]) {
+        return interaction.reply({
+            content: 'This poll is no longer available.',
+            ephemeral: true
+        });
+    }
+
+    record.votes = record.votes || {};
+    record.votes[interaction.user.id] = optionIndex;
+    polls.set(`${interaction.guild.id}:${record.id}`, record);
+    savePolls();
+
+    await interaction.reply({
+        content: `Your vote was saved for **${record.options[optionIndex]}**.`,
+        ephemeral: true
+    });
+
+    const pollMessage = await interaction.channel.messages.fetch(record.messageId).catch(() => null);
+    await pollMessage?.edit({
+        embeds: [createPollEmbed(record)],
+        components: createPollRows(record)
+    }).catch(() => {});
+
+}
+
+function loadXpRecords() {
+
+    xpRecords.clear();
+
+    for (const record of readJsonArrayFile(XP_FILE)) {
+        if (record?.guildId && record?.userId) xpRecords.set(`${record.guildId}:${record.userId}`, record);
+    }
+
+}
+
+function saveXpRecords() {
+    writeJsonArrayFile(XP_FILE, [...xpRecords.values()]);
+}
+
+function getXpLevel(xp) {
+    return Math.floor(Math.sqrt((xp || 0) / 100));
+}
+
+async function addXpForMessage(message) {
+
+    if (!message.guild || message.author.bot || message.content.startsWith('!')) return;
+
+    const key = `${message.guild.id}:${message.author.id}`;
+
+    if (Date.now() - (xpCooldowns.get(key) || 0) < XP_COOLDOWN_MS) return;
+
+    xpCooldowns.set(key, Date.now());
+
+    const record = xpRecords.get(key) || {
+        guildId: message.guild.id,
+        userId: message.author.id,
+        xp: 0,
+        messages: 0
+    };
+    const oldLevel = getXpLevel(record.xp);
+
+    record.xp += 15 + Math.floor(Math.random() * 11);
+    record.messages++;
+    record.updatedAt = new Date().toISOString();
+    xpRecords.set(key, record);
+    saveXpRecords();
+
+    const newLevel = getXpLevel(record.xp);
+
+    if (newLevel > oldLevel && newLevel > 0) {
+        message.channel.send(`${message.author} reached level **${newLevel}**.`).catch(() => {});
+    }
+
+}
+
+async function handleRankCommand(message, args) {
+
+    const targetUser = await resolveUserFromArgs(message, args) || message.author;
+    const record = xpRecords.get(`${message.guild.id}:${targetUser.id}`) || {
+        xp: 0,
+        messages: 0
+    };
+
+    await message.channel.send({
+        embeds: [
+            new EmbedBuilder()
+                .setColor('#57F287')
+                .setTitle(`Rank for ${targetUser.tag || targetUser.username}`)
+                .addFields(
+                    {
+                        name: 'Level',
+                        value: `${getXpLevel(record.xp)}`,
+                        inline: true
+                    },
+                    {
+                        name: 'XP',
+                        value: `${record.xp || 0}`,
+                        inline: true
+                    },
+                    {
+                        name: 'Tracked Messages',
+                        value: `${record.messages || 0}`,
+                        inline: true
+                    }
+                )
+                .setTimestamp()
+        ]
+    });
+
+}
+
+function loadSuggestions() {
+
+    suggestions.clear();
+
+    for (const record of readJsonArrayFile(SUGGESTIONS_FILE)) {
+        if (record?.guildId && record?.id) suggestions.set(`${record.guildId}:${record.id}`, record);
+    }
+
+}
+
+function saveSuggestions() {
+    writeJsonArrayFile(SUGGESTIONS_FILE, [...suggestions.values()]);
+}
+
+function createSuggestionEmbed(record) {
+
+    return new EmbedBuilder()
+        .setColor(record.status === 'approved' ? '#57F287' : record.status === 'denied' ? '#ED4245' : '#FEE75C')
+        .setTitle(`Suggestion ${record.status || 'pending'}: ${record.id}`)
+        .setDescription(record.text)
+        .addFields(
+            {
+                name: 'Submitted By',
+                value: `<@${record.authorId}>`,
+                inline: true
+            },
+            {
+                name: 'Status',
+                value: record.status || 'pending',
+                inline: true
+            }
+        )
+        .setTimestamp(new Date(record.createdAt));
+
+}
+
+function createSuggestionRow(record) {
+
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`suggestion_approve:${record.id}`)
+            .setLabel('Approve')
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(record.status !== 'pending'),
+        new ButtonBuilder()
+            .setCustomId(`suggestion_deny:${record.id}`)
+            .setLabel('Deny')
+            .setStyle(ButtonStyle.Danger)
+            .setDisabled(record.status !== 'pending')
+    );
+
+}
+
+async function handleSuggestCommand(message, args) {
+
+    const text = args.join(' ').trim();
+
+    if (!text) return message.reply('Usage: `!suggest your idea`');
+
+    const record = {
+        id: crypto.randomBytes(3).toString('hex'),
+        guildId: message.guild.id,
+        channelId: message.channel.id,
+        messageId: null,
+        authorId: message.author.id,
+        text,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+    };
+
+    const suggestionMessage = await message.channel.send({
+        embeds: [createSuggestionEmbed(record)],
+        components: [createSuggestionRow(record)],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+    record.messageId = suggestionMessage.id;
+    suggestions.set(`${message.guild.id}:${record.id}`, record);
+    saveSuggestions();
+    await message.reply(`Suggestion **${record.id}** submitted.`);
+
+}
+
+async function handleSuggestionButton(interaction) {
+
+    if (!hasModAccess(interaction.member)) {
+        return interaction.reply({
+            content: 'No permission.',
+            ephemeral: true
+        });
+    }
+
+    const [action, suggestionId] = interaction.customId.split(':');
+    const record = suggestions.get(`${interaction.guild.id}:${suggestionId}`);
+
+    if (!record || record.status !== 'pending') {
+        return interaction.reply({
+            content: 'This suggestion is no longer pending.',
+            ephemeral: true
+        });
+    }
+
+    record.status = action === 'suggestion_approve' ? 'approved' : 'denied';
+    record.reviewedBy = interaction.user.id;
+    record.reviewedAt = new Date().toISOString();
+    suggestions.set(`${interaction.guild.id}:${record.id}`, record);
+    saveSuggestions();
+
+    await interaction.update({
+        embeds: [createSuggestionEmbed(record)],
+        components: [createSuggestionRow(record)],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleStaffApplyCommand(message, args) {
+    await handleTicketOpenCommand(message, ['admin', `Staff application: ${args.join(' ').trim() || 'No details provided.'}`]);
+}
+
+async function handleReopenCommand(message, args) {
+
+    if (!hasModAccess(message.member)) return message.reply('No permission.');
+
+    const caseRecord = findCase(message.guild.id, args[0]);
+
+    if (!caseRecord?.targetUserId) return message.reply('Usage: `!reopen caseId` for a case with a target user.');
+
+    const targetMember = await message.guild.members.fetch(caseRecord.targetUserId).catch(() => null);
+
+    if (!targetMember) return message.reply('That user is not currently in the server.');
+
+    const result = await createTicketForMember(
+        message.guild,
+        targetMember,
+        `Reopened from case #${caseRecord.caseId}: ${caseRecord.reason}`,
+        caseRecord.ticketType || 'general'
+    );
+
+    await message.reply(result.ok ? `Reopened ticket: ${result.channel}` : result.message);
+
+}
+
+async function handleProfileCommand(message, args) {
+
+    const targetMember = await resolveMemberFromArgs(message, args) || message.member;
+    const targetUser = targetMember.user;
+    const noteCount = (staffNotes.get(`${message.guild.id}:${targetUser.id}`) || []).length;
+    const caseCount = getGuildCaseStore(message.guild.id).cases.filter(caseRecord => caseRecord.targetUserId === targetUser.id).length;
+    const vrcRecord = vrcVerificationRecords.get(getVrcVerifyKey(message.guild.id, targetUser.id));
+    const xpRecord = xpRecords.get(`${message.guild.id}:${targetUser.id}`) || {
+        xp: 0,
+        messages: 0
+    };
+    const ticketCount = getGuildCaseStore(message.guild.id).cases.filter(caseRecord =>
+        caseRecord.targetUserId === targetUser.id &&
+        String(caseRecord.type || '').includes('TICKET')
+    ).length;
+
+    await message.channel.send({
+        embeds: [
+            new EmbedBuilder()
+                .setColor('#2B90D9')
+                .setTitle(`Profile: ${targetUser.tag}`)
+                .setThumbnail(targetUser.displayAvatarURL({
+                    dynamic: true
+                }))
+                .addFields(
+                    {
+                        name: 'Discord',
+                        value: `ID: ${targetUser.id}\nJoined: ${targetMember.joinedTimestamp ? `<t:${Math.floor(targetMember.joinedTimestamp / 1000)}:R>` : 'Unknown'}\nCreated: <t:${Math.floor(targetUser.createdTimestamp / 1000)}:R>`,
+                        inline: false
+                    },
+                    {
+                        name: 'VRChat',
+                        value: vrcRecord ? `${vrcRecord.vrcDisplayName} (${vrcRecord.vrcUserId})` : 'Not linked',
+                        inline: false
+                    },
+                    {
+                        name: 'Activity',
+                        value: `Level ${getXpLevel(xpRecord.xp)} (${xpRecord.xp || 0} XP)\nInvites: ${inviteStats.get(targetUser.id) || 0}`,
+                        inline: true
+                    },
+                    {
+                        name: 'Staff Data',
+                        value: `Cases: ${caseCount}\nNotes: ${noteCount}\nTickets: ${ticketCount}`,
+                        inline: true
+                    },
+                    {
+                        name: 'Roles',
+                        value: targetMember.roles.cache
+                            .filter(role => role.id !== message.guild.id)
+                            .map(role => `${role}`)
+                            .slice(0, 20)
+                            .join(', ') || 'No roles',
+                        inline: false
+                    }
+                )
+                .setTimestamp()
+        ],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function handleStaffPanelCommand(message) {
+
+    if (!hasModAccess(message.member)) return message.reply('No permission.');
+
+    const openTickets = [...ticketRecords.values()].filter(record => record.guildId === message.guild.id && record.status === 'open');
+    const pendingAppeals = openTickets.filter(record => record.ticketType === 'appeal').length;
+    const recentCases = getGuildCaseStore(message.guild.id).cases.slice(-5).reverse();
+    const activeTempRoles = [...tempRoles.values()].filter(record => record.guildId === message.guild.id).length;
+
+    await message.channel.send({
+        embeds: [
+            new EmbedBuilder()
+                .setColor('#5865F2')
+                .setTitle('Staff Dashboard')
+                .addFields(
+                    {
+                        name: 'Tickets',
+                        value: `Open: ${openTickets.length}\nPending appeals: ${pendingAppeals}`,
+                        inline: true
+                    },
+                    {
+                        name: 'Moderation',
+                        value: `Recent cases: ${recentCases.length}\nActive temp roles: ${activeTempRoles}\nRaid joins tracked: ${(antiRaidJoinTimestamps.get(message.guild.id) || []).length}`,
+                        inline: true
+                    },
+                    {
+                        name: 'Recent Cases',
+                        value: recentCases.length
+                            ? recentCases.map(caseRecord => `#${caseRecord.caseId} ${caseRecord.type} - ${truncateText(caseRecord.reason, 80)}`).join('\n')
+                            : 'No cases yet.',
+                        inline: false
+                    }
+                )
+                .setTimestamp()
+        ]
+    });
+
+}
+
+async function handleAutomodCommand(message, args) {
+
+    if (!hasServerAdminOrOwnerAccess(message.member)) return message.reply('No permission. Only server admins or the server owner can use this command.');
+
+    const subcommand = args[0]?.toLowerCase();
+
+    if (subcommand === 'on' || subcommand === 'off') {
+        const enabled = subcommand === 'on';
+        setAppConfig(message.guild.id, config => {
+            config.automodEnabled = enabled;
+        });
+        return message.reply(`Auto moderation is now **${enabled ? 'on' : 'off'}**.`);
+    }
+
+    if (subcommand === 'block') {
+        const word = args.slice(1).join(' ').toLowerCase().trim();
+        if (!word) return message.reply('Usage: `!automod block word/phrase`');
+        setAppConfig(message.guild.id, config => {
+            config.blockedWords = [...new Set([...(config.blockedWords || []), word])];
+        });
+        return message.reply(`Blocked phrase added: \`${word}\``);
+    }
+
+    if (subcommand === 'unblock') {
+        const word = args.slice(1).join(' ').toLowerCase().trim();
+        setAppConfig(message.guild.id, config => {
+            config.blockedWords = (config.blockedWords || []).filter(blockedWord => blockedWord !== word);
+        });
+        return message.reply(`Blocked phrase removed: \`${word}\``);
+    }
+
+    const config = getAppConfig(message.guild.id);
+    await message.reply(`Auto moderation: **${config.automodEnabled ? 'on' : 'off'}**\nBlocked phrases: ${(config.blockedWords || []).join(', ') || 'none'}\nUse \`!automod on/off\`, \`!automod block phrase\`, or \`!automod unblock phrase\`.`);
+
+}
+
+async function checkAutoModeration(message) {
+
+    const config = getAppConfig(message.guild.id);
+
+    if (!config.automodEnabled || message.member?.permissions.has(PermissionsBitField.Flags.ManageMessages)) return false;
+
+    const content = message.content || '';
+    const lowerContent = content.toLowerCase();
+    const blockedWords = config.blockedWords || [];
+    const hasBlockedWord = blockedWords.some(word => word && lowerContent.includes(word));
+    const mentionCount = message.mentions.users.size + message.mentions.roles.size;
+    const letters = content.replace(/[^a-z]/gi, '');
+    const capsRatio = letters.length >= 12
+        ? letters.replace(/[^A-Z]/g, '').length / letters.length
+        : 0;
+    const looksScammy = [
+        'free nitro',
+        'steam gift',
+        'airdrop',
+        'crypto giveaway'
+    ].some(phrase => lowerContent.includes(phrase));
+
+    if (!hasBlockedWord && mentionCount < 8 && capsRatio < 0.85 && !looksScammy) return false;
+
+    await message.delete().catch(() => {});
+    await warnMember(
+        message.member,
+        client.user,
+        hasBlockedWord ? 'AutoMod blocked phrase.' : looksScammy ? 'AutoMod scam phrase.' : mentionCount >= 8 ? 'AutoMod mass mentions.' : 'AutoMod excessive caps.',
+        message.channel,
+        message.content
+    ).catch(() => {});
+
+    await createCase(
+        message.guild,
+        'AUTOMOD',
+        message.author.id,
+        client.user,
+        hasBlockedWord ? 'Blocked phrase detected.' : looksScammy ? 'Scam phrase detected.' : mentionCount >= 8 ? 'Mass mentions detected.' : 'Excessive caps detected.'
+    );
+
+    return true;
+
+}
+
+function startEventReminderWorker() {
+
+    if (eventReminderInterval) return;
+
+    eventReminderInterval = setInterval(() => {
+        checkEventReminders().catch(error => console.error('Event reminder worker failed:', error));
+    }, EVENT_REMINDER_INTERVAL_MS);
+
+    checkEventReminders().catch(error => console.error('Event reminder worker failed:', error));
+
+}
+
+async function checkEventReminders() {
+
+    const now = Date.now();
+
+    for (const record of vrchatEvents.values()) {
+
+        if (record.reminderSent) continue;
+
+        const eventTime = Date.parse(record.timeText);
+
+        if (Number.isNaN(eventTime)) continue;
+        if (eventTime - now > EVENT_REMINDER_BEFORE_MS || eventTime <= now) continue;
+
+        const guild = client.guilds.cache.get(record.guildId);
+        const channel = guild?.channels.cache.get(record.channelId) ||
+            await guild?.channels.fetch(record.channelId).catch(() => null);
+
+        if (!channel?.isTextBased?.()) continue;
+
+        const goingUserIds = Object.entries(record.rsvps || {})
+            .filter(([, value]) => value === 'yes')
+            .map(([userId]) => userId);
+
+        await channel.send({
+            content: goingUserIds.length
+                ? goingUserIds.map(userId => `<@${userId}>`).join(' ')
+                : null,
+            embeds: [
+                new EmbedBuilder()
+                    .setColor('#FEE75C')
+                    .setTitle(`Event Reminder: ${record.title}`)
+                    .setDescription(`This event starts in about 1 hour.\n\n${record.description || ''}`)
+                    .addFields({
+                        name: 'When',
+                        value: record.timeText,
+                        inline: false
+                    })
+                    .setTimestamp()
+            ],
+            allowedMentions: {
+                users: goingUserIds
+            }
+        }).catch(() => {});
+
+        record.reminderSent = true;
+        vrchatEvents.set(getEventKey(record.guildId, record.id), record);
+        saveVrchatEvents();
 
     }
 
@@ -6078,6 +7233,11 @@ async function handleMessageCreate(message) {
     if (!message.content.startsWith('!') && await handleAntiRaidMessage(message)) {
         return;
     }
+
+    if (!message.content.startsWith('!')) {
+        if (await checkAutoModeration(message)) return;
+        await addXpForMessage(message);
+    }
     // ==========================================
     // VRCHAT COMMUNITY INFO COMMAND
     // ==========================================
@@ -6203,6 +7363,71 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         return;
     }
 
+    if (command === '!case') {
+        await handleCaseCommand(message, args);
+        return;
+    }
+
+    if (command === '!cases') {
+        await handleCasesCommand(message, args);
+        return;
+    }
+
+    if (command === '!editcase') {
+        await handleEditCaseCommand(message, args);
+        return;
+    }
+
+    if (command === '!automod') {
+        await handleAutomodCommand(message, args);
+        return;
+    }
+
+    if (command === '!staffpanel') {
+        await handleStaffPanelCommand(message);
+        return;
+    }
+
+    if (command === '!reopen') {
+        await handleReopenCommand(message, args);
+        return;
+    }
+
+    if (command === '!profile') {
+        await handleProfileCommand(message, args);
+        return;
+    }
+
+    if (command === '!temprole') {
+        await handleTempRoleCommand(message, args);
+        return;
+    }
+
+    if (command === '!giveaway') {
+        await handleGiveawayCommand(message, args);
+        return;
+    }
+
+    if (command === '!poll') {
+        await handlePollCommand(message, args);
+        return;
+    }
+
+    if (command === '!rank') {
+        await handleRankCommand(message, args);
+        return;
+    }
+
+    if (command === '!staffapply') {
+        await handleStaffApplyCommand(message, args);
+        return;
+    }
+
+    if (command === '!suggest') {
+        await handleSuggestCommand(message, args);
+        return;
+    }
+
     if (command === '!syncnick' || command === '!syncnickname') {
         const record = vrcVerificationRecords.get(getVrcVerifyKey(message.guild.id, message.author.id));
 
@@ -6273,6 +7498,14 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 `\`!event create title | time | description\` - Creates a VRChat event.
 \`!event list\` / \`!rsvp eventId yes/no/maybe\` - Event RSVP tools.
 \`!note @user note\` / \`!notes @user\` - Staff notes.
+\`!case id\` / \`!cases @user\` / \`!editcase id reason\` - Case tools.
+\`!profile [@user]\` / \`!staffpanel\` - Profile and staff dashboard.
+\`!temprole @user @role 7d\` - Temporary roles.
+\`!giveaway create prize | 1d | winners\` - Giveaways.
+\`!poll question | option 1 | option 2\` - Button polls.
+\`!rank [@user]\` - XP/rank.
+\`!staffapply [details]\` / \`!suggest idea\` - Applications and suggestions.
+\`!automod on/off\` / \`!automod block phrase\` - Auto moderation.
 \`!onboarding [#channel]\` - Sends the welcome/onboarding message.
 \`!config\` - Shows bot config, anti-raid, tickets, VRC, and events.`
                 },
@@ -7501,6 +8734,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         try {
 
             await target.roles.add(role, `Role added by ${message.author.tag}`);
+            await createCase(message.guild, 'ROLE_ADD', target.id, message.author, `Added role ${role.name}.`);
 
             await message.channel.send(`âœ… Added **${role.name}** to ${target}.`);
 
@@ -7587,6 +8821,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         try {
 
             await target.roles.remove(role, `Role removed by ${message.author.tag}`);
+            await createCase(message.guild, 'ROLE_REMOVE', target.id, message.author, `Removed role ${role.name}.`);
 
             await message.channel.send(`Removed **${role.name}** from ${target}.`);
 
@@ -7660,6 +8895,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
                 reason,
                 message.channel
             );
+            await createCase(message.guild, 'WARN', target.id, message.author, reason);
 
         } catch (error) {
 
@@ -7782,6 +9018,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             await message.channel.send(
                 `🔨 ${targetUser?.tag || targetUserId} was banned.\nReason: ${reason}`
             );
+            await createCase(message.guild, 'BAN', targetUserId, message.author, reason);
 
         } catch (error) {
 
@@ -7819,6 +9056,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             await message.channel.send(
                 `👢 ${target.user.tag} was kicked.\nReason: ${reason}`
             );
+            await createCase(message.guild, 'KICK', target.id, message.author, reason);
 
         } catch (error) {
 
@@ -7851,6 +9089,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             await message.channel.send(
                 `⏳ ${target.user.tag} timed out for ${minutes} minute(s).`
             );
+            await createCase(message.guild, 'TIMEOUT', target.id, message.author, `Timed out for ${minutes} minute(s).`);
 
         } catch (error) {
 
@@ -7882,6 +9121,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             await message.channel.send(
                 `✅ Removed timeout from ${target.user.tag}`
             );
+            await createCase(message.guild, 'UNTIMEOUT', target.id, message.author, 'Timeout removed.');
 
         } catch (error) {
 
@@ -7936,6 +9176,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             await message.channel.send(
                 `🔇 ${target.user.tag} has been muted.`
             );
+            await createCase(message.guild, 'MUTE', target.id, message.author, 'Muted role added.');
 
         } catch (error) {
 
@@ -7975,6 +9216,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             await message.channel.send(
                 `🔊 ${target.user.tag} has been unmuted.`
             );
+            await createCase(message.guild, 'UNMUTE', target.id, message.author, 'Muted role removed.');
 
         } catch (error) {
 
@@ -8231,6 +9473,21 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (!interaction.isButton()) return;
+
+    if (interaction.customId.startsWith('giveaway_join:')) {
+        await handleGiveawayButton(interaction);
+        return;
+    }
+
+    if (interaction.customId.startsWith('poll_vote:')) {
+        await handlePollButton(interaction);
+        return;
+    }
+
+    if (interaction.customId.startsWith('suggestion_')) {
+        await handleSuggestionButton(interaction);
+        return;
+    }
 
     if (interaction.customId.startsWith('ticket_')) {
         await handleTicketButtonInteraction(interaction);
