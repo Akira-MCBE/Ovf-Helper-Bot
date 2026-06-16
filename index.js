@@ -314,6 +314,15 @@ function hasModAccess(member) {
 
 }
 
+function hasServerAdminOrOwnerAccess(member) {
+
+    return (
+        member?.id === member?.guild?.ownerId ||
+        member?.permissions?.has(PermissionsBitField.Flags.Administrator)
+    );
+
+}
+
 function getLogChannel(guild) {
     return guild.channels.cache.get(LOG_CHANNEL_ID);
 }
@@ -4955,6 +4964,8 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 ✅ \`!untimeout @user/userID\` - Removes timeout.
 🔇 \`!mute @user/userID\` - Adds Muted role.
 🔊 \`!unmute @user/userID\` - Removes Muted role.
+➕ \`!addrole @user/userID @role\` - Adds a role to a member.
+➖ \`!removerole @user/userID @role\` - Removes a role from a member.
 🧹 \`!purge [amount]\` - Deletes messages.
 🧹 \`!massdelete user_id\` - Deletes a user's messages across accessible channels.
 ⚠️ \`!warn @user/userID [reason]\` - Warns a member. 3 warnings = 1 hour timeout.
@@ -6100,6 +6111,178 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
     // ==========================================
     // MODERATION COMMANDS
     // ==========================================
+
+    if (command === '!addrole') {
+
+        if (!hasServerAdminOrOwnerAccess(message.member)) {
+            return message.reply('No permission. Only server admins or the server owner can use this command.');
+        }
+
+        const target = await resolveMemberFromArgs(message, args);
+        const role = await resolveRoleFromArg(message, args.slice(1).join(' '));
+
+        if (!target || !role) {
+            return message.reply('âš ï¸ Usage: `!addrole @user/userID @role`');
+        }
+
+        if (target.roles.cache.has(role.id)) {
+            return message.reply(`âš ï¸ ${target.user.tag} already has the **${role.name}** role.`);
+        }
+
+        const botMember = await getBotMember(message.guild);
+
+        if (!botMember) {
+            return message.reply('âŒ I could not check my server permissions.');
+        }
+
+        if (!botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+            return message.reply('âŒ I need the **Manage Roles** permission to add roles.');
+        }
+
+        if (!canBotAssignRole(botMember, message.guild, role)) {
+            return message.reply(`âŒ I cannot assign **${role.name}**. Move my bot role above it in the role list.`);
+        }
+
+        if (
+            message.member.id !== message.guild.ownerId &&
+            message.member.roles.highest.comparePositionTo(role) <= 0
+        ) {
+            return message.reply('âŒ You cannot assign a role equal to or higher than your highest role.');
+        }
+
+        try {
+
+            await target.roles.add(role, `Role added by ${message.author.tag}`);
+
+            await message.channel.send(`âœ… Added **${role.name}** to ${target}.`);
+
+            const logChannel = getLogChannel(message.guild);
+
+            if (logChannel) {
+
+                const logEmbed = new EmbedBuilder()
+                    .setColor('#57F287')
+                    .setTitle('Role Added')
+                    .addFields(
+                        {
+                            name: 'User',
+                            value: `${target.user.tag} (${target.id})`,
+                            inline: false
+                        },
+                        {
+                            name: 'Role',
+                            value: `${role.name} (${role.id})`,
+                            inline: false
+                        },
+                        {
+                            name: 'Added By',
+                            value: `${message.author.tag} (${message.author.id})`,
+                            inline: false
+                        }
+                    )
+                    .setTimestamp();
+
+                logChannel.send({
+                    embeds: [logEmbed]
+                }).catch(() => {});
+
+            }
+
+        } catch (error) {
+
+            console.error('Add role command error:', error);
+            message.reply('âŒ Failed to add that role.');
+
+        }
+
+        return;
+    }
+
+    if (command === '!removerole') {
+
+        if (!hasServerAdminOrOwnerAccess(message.member)) {
+            return message.reply('No permission. Only server admins or the server owner can use this command.');
+        }
+
+        const target = await resolveMemberFromArgs(message, args);
+        const role = await resolveRoleFromArg(message, args.slice(1).join(' '));
+
+        if (!target || !role) {
+            return message.reply('Usage: `!removerole @user/userID @role`');
+        }
+
+        if (!target.roles.cache.has(role.id)) {
+            return message.reply(`${target.user.tag} does not have the **${role.name}** role.`);
+        }
+
+        const botMember = await getBotMember(message.guild);
+
+        if (!botMember) {
+            return message.reply('I could not check my server permissions.');
+        }
+
+        if (!botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+            return message.reply('I need the **Manage Roles** permission to remove roles.');
+        }
+
+        if (!canBotAssignRole(botMember, message.guild, role)) {
+            return message.reply(`I cannot manage **${role.name}**. Move my bot role above it in the role list.`);
+        }
+
+        if (
+            message.member.id !== message.guild.ownerId &&
+            message.member.roles.highest.comparePositionTo(role) <= 0
+        ) {
+            return message.reply('You cannot manage a role equal to or higher than your highest role.');
+        }
+
+        try {
+
+            await target.roles.remove(role, `Role removed by ${message.author.tag}`);
+
+            await message.channel.send(`Removed **${role.name}** from ${target}.`);
+
+            const logChannel = getLogChannel(message.guild);
+
+            if (logChannel) {
+
+                const logEmbed = new EmbedBuilder()
+                    .setColor('#ED4245')
+                    .setTitle('Role Removed')
+                    .addFields(
+                        {
+                            name: 'User',
+                            value: `${target.user.tag} (${target.id})`,
+                            inline: false
+                        },
+                        {
+                            name: 'Role',
+                            value: `${role.name} (${role.id})`,
+                            inline: false
+                        },
+                        {
+                            name: 'Removed By',
+                            value: `${message.author.tag} (${message.author.id})`,
+                            inline: false
+                        }
+                    )
+                    .setTimestamp();
+
+                logChannel.send({
+                    embeds: [logEmbed]
+                }).catch(() => {});
+
+            }
+
+        } catch (error) {
+
+            console.error('Remove role command error:', error);
+            message.reply('Failed to remove that role.');
+
+        }
+
+        return;
+    }
 
     if (command === '!warn') {
 
