@@ -8,6 +8,7 @@ const {
     ButtonStyle,
     PermissionsBitField,
     ChannelType,
+    ApplicationCommandOptionType,
     ActivityType,
     Partials
 } = require('discord.js');
@@ -69,6 +70,52 @@ const VRC_VERIFY_STORE_FILE = path.join(process.cwd(), 'vrc-verifications.json')
 const VRC_VERIFY_CODE_TTL_MS = 30 * 60 * 1000;
 const VRC_VERIFY_CODE_PREFIX = 'OVF-';
 const DEFAULT_VRC_VERIFIED_ROLE_ID = process.env.VRC_VERIFIED_ROLE_ID || REACTION_ROLE_ID;
+const APP_CONFIG_FILE = path.join(process.cwd(), 'community-config.json');
+const STAFF_NOTES_FILE = path.join(process.cwd(), 'staff-notes.json');
+const VRCHAT_EVENTS_FILE = path.join(process.cwd(), 'vrchat-events.json');
+const ANTI_RAID_JOIN_WINDOW_MS = 60 * 1000;
+const ANTI_RAID_JOIN_LIMIT = 5;
+const ANTI_RAID_MESSAGE_WINDOW_MS = 10 * 1000;
+const ANTI_RAID_MESSAGE_LIMIT = 6;
+const ANTI_RAID_REPEAT_LIMIT = 3;
+
+const DEFAULT_TICKET_TYPES = [
+    {
+        id: 'general',
+        label: 'General Support',
+        style: ButtonStyle.Primary,
+        adminOnly: false,
+        description: 'General support ticket'
+    },
+    {
+        id: 'report',
+        label: 'Report User',
+        style: ButtonStyle.Danger,
+        adminOnly: false,
+        description: 'Report a member or issue'
+    },
+    {
+        id: 'partnership',
+        label: 'Partnership',
+        style: ButtonStyle.Secondary,
+        adminOnly: false,
+        description: 'Partnership request'
+    },
+    {
+        id: 'appeal',
+        label: 'Appeal',
+        style: ButtonStyle.Secondary,
+        adminOnly: false,
+        description: 'Appeal a moderation action'
+    },
+    {
+        id: 'admin',
+        label: 'Admin Only',
+        style: ButtonStyle.Danger,
+        adminOnly: true,
+        description: 'Private admin-only ticket'
+    }
+];
 
 const MOD_ROLE_IDS = [
     '1447375395383935066',
@@ -140,6 +187,13 @@ const vrcVerifyConfigs = new Map();
 const vrcVerificationRecords = new Map();
 const pendingVrcVerifications = new Map();
 
+// Community systems
+const appConfigs = new Map();
+const staffNotes = new Map();
+const vrchatEvents = new Map();
+const antiRaidJoinTimestamps = new Map();
+const antiRaidMessageTimestamps = new Map();
+
 // VRChat group post watcher state
 const seenVrchatPostIds = new Set();
 const MAX_SEEN_VRCHAT_POST_IDS = 500;
@@ -193,6 +247,9 @@ client.once('clientReady', async () => {
     loadTicketRecords();
     loadVrcVerifyConfigs();
     loadVrcVerificationRecords();
+    loadAppConfigs();
+    loadStaffNotes();
+    loadVrchatEvents();
 
     client.user.setPresence({
     activities: [
@@ -229,6 +286,7 @@ client.once('clientReady', async () => {
     }
 
     startVrchatGroupPostWatcher();
+    registerSlashCommandsForGuilds();
 
 });
 
@@ -499,9 +557,13 @@ function normalizeTicketRecord(record = {}) {
         channelId,
         ownerId,
         ticketNumber: Math.max(0, Number.parseInt(record.ticketNumber || record.number || '0', 10) || 0),
+        ticketType: String(record.ticketType || 'general'),
         status: record.status === 'closed' ? 'closed' : 'open',
         createdAt: record.createdAt || new Date().toISOString(),
         reason: String(record.reason || 'No reason provided.'),
+        closeReason: record.closeReason || null,
+        rating: record.rating || null,
+        ratingComment: record.ratingComment || null,
         claimedBy: /^\d{17,20}$/.test(String(record.claimedBy || '')) ? String(record.claimedBy) : null,
         escalated: Boolean(record.escalated),
         escalatedBy: /^\d{17,20}$/.test(String(record.escalatedBy || '')) ? String(record.escalatedBy) : null,
@@ -723,7 +785,21 @@ function getTranscriptFileName(channel, record) {
 
 }
 
-function getTicketPermissionOverwrites(guild, ownerId, config) {
+function getTicketTypeById(ticketTypeId) {
+    return DEFAULT_TICKET_TYPES.find(type => type.id === ticketTypeId) || DEFAULT_TICKET_TYPES[0];
+}
+
+function getTicketTypeIdFromArgs(args) {
+
+    const firstArg = String(args[0] || '').toLowerCase();
+
+    if (!firstArg) return null;
+
+    return DEFAULT_TICKET_TYPES.some(type => type.id === firstArg) ? firstArg : null;
+
+}
+
+function getTicketPermissionOverwrites(guild, ownerId, config, ticketType = getTicketTypeById('general')) {
 
     const allowTicketMember = [
         PermissionsBitField.Flags.ViewChannel,
@@ -758,7 +834,9 @@ function getTicketPermissionOverwrites(guild, ownerId, config) {
         }
     ];
 
-    for (const roleId of config.supportRoleIds) {
+    const staffRoleIds = ticketType.adminOnly ? config.adminRoleIds : config.supportRoleIds;
+
+    for (const roleId of staffRoleIds) {
 
         if (!guild.roles.cache.has(roleId)) continue;
 
@@ -776,12 +854,18 @@ function getTicketPermissionOverwrites(guild, ownerId, config) {
 function createTicketOpenRow() {
 
     return new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId('ticket_open')
-            .setLabel('Open Ticket')
-            .setStyle(ButtonStyle.Success)
+        ...DEFAULT_TICKET_TYPES.map(ticketType =>
+            new ButtonBuilder()
+                .setCustomId(`ticket_open:${ticketType.id}`)
+                .setLabel(ticketType.label)
+                .setStyle(ticketType.style)
+        )
     );
 
+}
+
+function createTicketOpenRows() {
+    return [createTicketOpenRow()];
 }
 
 function createTicketControlRow(record = {}) {
@@ -862,9 +946,10 @@ async function sendTicketLog(guild, title, fields = [], color = '#5865F2', confi
 
 }
 
-async function createTicketForMember(guild, member, reason = 'No reason provided.') {
+async function createTicketForMember(guild, member, reason = 'No reason provided.', ticketTypeId = 'general') {
 
     const config = getTicketConfig(guild.id);
+    const ticketType = getTicketTypeById(ticketTypeId);
     const existingTicketChannel = await findOpenTicketChannelForUser(guild, member.id);
 
     if (existingTicketChannel) {
@@ -890,8 +975,8 @@ async function createTicketForMember(guild, member, reason = 'No reason provided
     const ticketChannelOptions = {
         name: channelName,
         type: ChannelType.GuildText,
-        topic: `Ticket #${ticketNumber} | Owner: ${member.user.tag} (${member.id}) | ticket-owner:${member.id}`,
-        permissionOverwrites: getTicketPermissionOverwrites(guild, member.id, config)
+        topic: `Ticket #${ticketNumber} | Type: ${ticketType.label} | Owner: ${member.user.tag} (${member.id}) | ticket-owner:${member.id}`,
+        permissionOverwrites: getTicketPermissionOverwrites(guild, member.id, config, ticketType)
     };
 
     if (category) {
@@ -905,6 +990,7 @@ async function createTicketForMember(guild, member, reason = 'No reason provided
         channelId: ticketChannel.id,
         ownerId: member.id,
         ticketNumber,
+        ticketType: ticketType.id,
         createdAt: new Date().toISOString(),
         reason
     });
@@ -917,9 +1003,14 @@ async function createTicketForMember(guild, member, reason = 'No reason provided
 
     const welcomeEmbed = new EmbedBuilder()
         .setColor('#2B90D9')
-        .setTitle(`Ticket #${ticketNumber}`)
+        .setTitle(`Ticket #${ticketNumber} - ${ticketType.label}`)
         .setDescription('Support will be with you soon. Use `!close` when this is finished, or `!escalate` if you need an admin.')
         .addFields(
+            {
+                name: 'Type',
+                value: ticketType.label,
+                inline: true
+            },
             {
                 name: 'Opened By',
                 value: `${member.user.tag} (${member.id})`,
@@ -961,6 +1052,11 @@ async function createTicketForMember(guild, member, reason = 'No reason provided
                 name: 'Reason',
                 value: reason || 'No reason provided.',
                 inline: false
+            },
+            {
+                name: 'Type',
+                value: ticketType.label,
+                inline: true
             }
         ],
         '#2B90D9',
@@ -1080,15 +1176,19 @@ function formatTranscriptMessage(message) {
 function buildTicketTranscript(channel, record, messages, actorUser, reason, actionLabel) {
 
     const owner = channel.guild.members.cache.get(record.ownerId)?.user;
+    const ticketType = getTicketTypeById(record.ticketType);
     const header = [
         `Ticket Transcript - ${channel.guild.name}`,
         `Action: ${actionLabel}`,
         `Ticket: #${record.ticketNumber || channel.id}`,
+        `Type: ${ticketType.label}`,
         `Channel: #${channel.name} (${channel.id})`,
         `Opened By: ${owner ? `${owner.tag} (${owner.id})` : record.ownerId}`,
         `Created At: ${record.createdAt}`,
         `Closed/Logged By: ${actorUser.tag || actorUser.username} (${actorUser.id})`,
         `Reason: ${reason || 'No reason provided.'}`,
+        `Rating: ${record.rating ? `${record.rating}/5` : 'Not rated'}`,
+        `Rating Comment: ${record.ratingComment || 'No comment'}`,
         `Messages: ${messages.length}`,
         ''.padEnd(60, '=')
     ];
@@ -1143,6 +1243,11 @@ async function sendTicketTranscriptToLogs(channel, record, actorUser, reason, ac
                 name: 'Reason',
                 value: truncateText(reason || 'No reason provided.', 1000),
                 inline: false
+            },
+            {
+                name: 'Rating',
+                value: record.rating ? `${record.rating}/5` : 'Not rated',
+                inline: true
             }
         )
         .setTimestamp();
@@ -1162,13 +1267,16 @@ async function sendTicketTranscriptToLogs(channel, record, actorUser, reason, ac
 
 }
 
-async function closeTicketChannel(channel, actorUser, reason = 'No reason provided.') {
+async function closeTicketChannel(channel, actorUser, reason = 'No reason provided.', rating = null) {
 
     const record = getTicketRecordForChannel(channel);
 
     if (!record) {
         throw new Error('This does not look like a ticket channel.');
     }
+
+    record.closeReason = reason;
+    record.rating = rating || record.rating || null;
 
     await channel.send('Creating ticket transcript before closing...').catch(() => {});
 
@@ -1673,7 +1781,7 @@ async function handleTicketSetupCommand(message, args) {
 
     await targetChannel.send({
         embeds: [embed],
-        components: [createTicketOpenRow()],
+        components: createTicketOpenRows(),
         allowedMentions: {
             parse: []
         }
@@ -1685,11 +1793,13 @@ async function handleTicketSetupCommand(message, args) {
 
 async function handleTicketOpenCommand(message, args) {
 
-    const reason = args.join(' ').trim() || 'No reason provided.';
+    const ticketTypeId = getTicketTypeIdFromArgs(args) || 'general';
+    const reasonArgs = getTicketTypeIdFromArgs(args) ? args.slice(1) : args;
+    const reason = reasonArgs.join(' ').trim() || 'No reason provided.';
 
     try {
 
-        const result = await createTicketForMember(message.guild, message.member, reason);
+        const result = await createTicketForMember(message.guild, message.member, reason, ticketTypeId);
 
         if (!result.ok) {
             return message.reply(result.message);
@@ -1720,11 +1830,15 @@ async function handleTicketCloseCommand(message, args) {
         return message.reply('Only the ticket opener or ticket support staff can close this ticket.');
     }
 
-    const reason = args.join(' ').trim() || 'No reason provided.';
+    const closeText = args.join(' ').trim();
+    const ratingMatch = closeText.match(/(?:^|\s|\|)([1-5])(?:\s*\/\s*5)?$/);
+    const rating = ratingMatch ? Number.parseInt(ratingMatch[1], 10) : null;
+    const reason = (ratingMatch ? closeText.slice(0, ratingMatch.index).replace(/\|+$/, '').trim() : closeText) ||
+        'No reason provided.';
 
     try {
 
-        await closeTicketChannel(message.channel, message.author, reason);
+        await closeTicketChannel(message.channel, message.author, reason, rating);
 
     } catch (error) {
 
@@ -1732,6 +1846,58 @@ async function handleTicketCloseCommand(message, args) {
         await message.reply(`Failed to close ticket: ${error.message}`);
 
     }
+
+}
+
+async function handleTicketRatingCommand(message, args) {
+
+    const record = getTicketRecordForChannel(message.channel);
+
+    if (!record) {
+        return message.reply('This command only works inside a ticket channel.');
+    }
+
+    if (!isTicketOwner(message.member, record)) {
+        return message.reply('Only the ticket opener can rate this ticket.');
+    }
+
+    const rating = Number.parseInt(args[0], 10);
+    const comment = args.slice(1).join(' ').trim();
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+        return message.reply('Usage: `!rateticket 1-5 [comment]`');
+    }
+
+    record.rating = rating;
+    record.ratingComment = comment || null;
+    ticketRecords.set(message.channel.id, record);
+    saveTicketRecords();
+
+    await message.reply(`Thanks. Your ticket rating was saved as **${rating}/5**.`);
+
+    await sendTicketLog(
+        message.guild,
+        'Ticket Rated',
+        [
+            {
+                name: 'Ticket',
+                value: `${message.channel} (#${record.ticketNumber || message.channel.id})`,
+                inline: true
+            },
+            {
+                name: 'Rating',
+                value: `${rating}/5`,
+                inline: true
+            },
+            {
+                name: 'Comment',
+                value: comment || 'No comment.',
+                inline: false
+            }
+        ],
+        '#FEE75C',
+        getTicketConfig(message.guild.id)
+    );
 
 }
 
@@ -1871,7 +2037,7 @@ async function handleTicketButtonInteraction(interaction) {
     const member = await interaction.guild.members.fetch(interaction.user.id)
         .catch(() => interaction.member);
 
-    if (interaction.customId === 'ticket_open') {
+    if (interaction.customId.startsWith('ticket_open')) {
 
         await interaction.deferReply({
             ephemeral: true
@@ -1882,7 +2048,8 @@ async function handleTicketButtonInteraction(interaction) {
             const result = await createTicketForMember(
                 interaction.guild,
                 member,
-                'Opened from the ticket panel.'
+                'Opened from the ticket panel.',
+                interaction.customId.split(':')[1] || 'general'
             );
 
             await interaction.editReply(result.ok
@@ -2658,6 +2825,7 @@ async function handleVrcConfirmCommand(message, args) {
         }
 
         const verifiedRole = await applyVrcVerifiedRole(message.member, config);
+        await syncMemberNicknameToVrc(message.member, vrcUser.displayName);
         const record = normalizeVrcVerificationRecord({
             guildId: message.guild.id,
             discordUserId: message.author.id,
@@ -2801,6 +2969,872 @@ async function handleVrcUnverifyCommand(message, args) {
         '#ED4245',
         config
     );
+
+}
+
+function normalizeAppConfig(config = {}) {
+
+    return {
+        onboardingChannelId: /^\d{17,20}$/.test(String(config.onboardingChannelId || '')) ? String(config.onboardingChannelId) : null,
+        eventChannelId: /^\d{17,20}$/.test(String(config.eventChannelId || '')) ? String(config.eventChannelId) : VRCHAT_POST_CHANNEL_ID,
+        notesLogChannelId: /^\d{17,20}$/.test(String(config.notesLogChannelId || '')) ? String(config.notesLogChannelId) : LOG_CHANNEL_ID,
+        antiRaidEnabled: config.antiRaidEnabled !== false,
+        nicknameSyncEnabled: config.nicknameSyncEnabled !== false
+    };
+
+}
+
+function loadAppConfigs() {
+
+    if (!fs.existsSync(APP_CONFIG_FILE)) return;
+
+    try {
+
+        const savedConfigs = JSON.parse(fs.readFileSync(APP_CONFIG_FILE, 'utf8'));
+
+        if (!savedConfigs || typeof savedConfigs !== 'object') return;
+
+        appConfigs.clear();
+
+        for (const [guildId, config] of Object.entries(savedConfigs)) {
+            if (/^\d{17,20}$/.test(guildId)) {
+                appConfigs.set(guildId, normalizeAppConfig(config));
+            }
+        }
+
+    } catch (error) {
+        console.error('Failed to load community config:', error);
+    }
+
+}
+
+function saveAppConfigs() {
+
+    try {
+        fs.writeFileSync(APP_CONFIG_FILE, JSON.stringify(Object.fromEntries(appConfigs.entries()), null, 2));
+    } catch (error) {
+        console.error('Failed to save community config:', error);
+    }
+
+}
+
+function getAppConfig(guildId) {
+
+    if (!appConfigs.has(guildId)) {
+        appConfigs.set(guildId, normalizeAppConfig());
+    }
+
+    return appConfigs.get(guildId);
+
+}
+
+function setAppConfig(guildId, updater) {
+
+    const config = {
+        ...getAppConfig(guildId)
+    };
+
+    updater(config);
+    appConfigs.set(guildId, normalizeAppConfig(config));
+    saveAppConfigs();
+
+    return appConfigs.get(guildId);
+
+}
+
+function loadStaffNotes() {
+
+    if (!fs.existsSync(STAFF_NOTES_FILE)) return;
+
+    try {
+
+        const savedNotes = JSON.parse(fs.readFileSync(STAFF_NOTES_FILE, 'utf8'));
+
+        staffNotes.clear();
+
+        for (const note of Array.isArray(savedNotes) ? savedNotes : []) {
+
+            if (!note?.guildId || !note?.targetUserId || !note?.note) continue;
+
+            const key = `${note.guildId}:${note.targetUserId}`;
+            const notes = staffNotes.get(key) || [];
+            notes.push(note);
+            staffNotes.set(key, notes);
+
+        }
+
+    } catch (error) {
+        console.error('Failed to load staff notes:', error);
+    }
+
+}
+
+function saveStaffNotes() {
+
+    try {
+        fs.writeFileSync(STAFF_NOTES_FILE, JSON.stringify([...staffNotes.values()].flat(), null, 2));
+    } catch (error) {
+        console.error('Failed to save staff notes:', error);
+    }
+
+}
+
+function loadVrchatEvents() {
+
+    if (!fs.existsSync(VRCHAT_EVENTS_FILE)) return;
+
+    try {
+
+        const savedEvents = JSON.parse(fs.readFileSync(VRCHAT_EVENTS_FILE, 'utf8'));
+
+        vrchatEvents.clear();
+
+        for (const eventRecord of Array.isArray(savedEvents) ? savedEvents : []) {
+
+            if (!eventRecord?.guildId || !eventRecord?.id || !eventRecord?.title) continue;
+
+            vrchatEvents.set(`${eventRecord.guildId}:${eventRecord.id}`, {
+                ...eventRecord,
+                rsvps: eventRecord.rsvps || {}
+            });
+
+        }
+
+    } catch (error) {
+        console.error('Failed to load VRChat events:', error);
+    }
+
+}
+
+function saveVrchatEvents() {
+
+    try {
+        fs.writeFileSync(VRCHAT_EVENTS_FILE, JSON.stringify([...vrchatEvents.values()], null, 2));
+    } catch (error) {
+        console.error('Failed to save VRChat events:', error);
+    }
+
+}
+
+async function sendConfiguredLog(guild, channelId, embed) {
+
+    const channel = guild.channels.cache.get(channelId) ||
+        await guild.channels.fetch(channelId).catch(() => null);
+
+    if (channel?.isTextBased?.() && channel.send) {
+        await channel.send({
+            embeds: [embed],
+            allowedMentions: {
+                parse: []
+            }
+        }).catch(() => {});
+    }
+
+}
+
+async function handleAntiRaidJoin(member) {
+
+    const config = getAppConfig(member.guild.id);
+
+    if (!config.antiRaidEnabled) return;
+
+    const now = Date.now();
+    const timestamps = (antiRaidJoinTimestamps.get(member.guild.id) || [])
+        .filter(timestamp => now - timestamp <= ANTI_RAID_JOIN_WINDOW_MS);
+
+    timestamps.push(now);
+    antiRaidJoinTimestamps.set(member.guild.id, timestamps);
+
+    if (timestamps.length !== ANTI_RAID_JOIN_LIMIT) return;
+
+    const logChannel = getLogChannel(member.guild);
+
+    if (!logChannel) return;
+
+    const embed = new EmbedBuilder()
+        .setColor('#ED4245')
+        .setTitle('Anti-Raid Alert')
+        .setDescription(`${timestamps.length} members joined within ${ANTI_RAID_JOIN_WINDOW_MS / 1000} seconds.`)
+        .setTimestamp();
+
+    await logChannel.send({
+        content: MOD_ROLE_IDS.map(roleId => `<@&${roleId}>`).join(' '),
+        embeds: [embed],
+        allowedMentions: {
+            roles: MOD_ROLE_IDS
+        }
+    }).catch(() => {});
+
+}
+
+async function handleAntiRaidMessage(message) {
+
+    const config = getAppConfig(message.guild.id);
+
+    if (!config.antiRaidEnabled || message.member?.permissions.has(PermissionsBitField.Flags.ManageMessages)) return false;
+
+    const now = Date.now();
+    const key = `${message.guild.id}:${message.author.id}`;
+    const records = (antiRaidMessageTimestamps.get(key) || [])
+        .filter(record => now - record.createdAt <= ANTI_RAID_MESSAGE_WINDOW_MS);
+
+    records.push({
+        createdAt: now,
+        content: normalizeAskQuestion(message.content)
+    });
+
+    antiRaidMessageTimestamps.set(key, records);
+
+    const repeatedCount = records.filter(record => record.content && record.content === records[records.length - 1].content).length;
+
+    if (records.length < ANTI_RAID_MESSAGE_LIMIT && repeatedCount < ANTI_RAID_REPEAT_LIMIT) return false;
+
+    await message.delete().catch(() => {});
+    await message.member.timeout(10 * 60 * 1000, 'Anti-raid spam detection.').catch(() => {});
+
+    const logChannel = getLogChannel(message.guild);
+
+    if (logChannel) {
+
+        const embed = new EmbedBuilder()
+            .setColor('#ED4245')
+            .setTitle('Anti-Raid Message Action')
+            .addFields(
+                {
+                    name: 'User',
+                    value: `${message.author.tag} (${message.author.id})`,
+                    inline: false
+                },
+                {
+                    name: 'Channel',
+                    value: `${message.channel}`,
+                    inline: true
+                },
+                {
+                    name: 'Action',
+                    value: 'Message deleted and 10 minute timeout attempted.',
+                    inline: false
+                }
+            )
+            .setTimestamp();
+
+        logChannel.send({
+            embeds: [embed]
+        }).catch(() => {});
+
+    }
+
+    return true;
+
+}
+
+async function handleNoteCommand(message, args) {
+
+    if (!hasModAccess(message.member)) {
+        return message.reply('No permission.');
+    }
+
+    const targetUser = await resolveUserFromArgs(message, args);
+    const noteText = args.slice(1).join(' ').trim();
+
+    if (!targetUser || !noteText) {
+        return message.reply('Usage: `!note @user/userID note text`');
+    }
+
+    const note = {
+        id: crypto.randomBytes(4).toString('hex'),
+        guildId: message.guild.id,
+        targetUserId: targetUser.id,
+        authorId: message.author.id,
+        authorTag: message.author.tag,
+        note: noteText,
+        createdAt: new Date().toISOString()
+    };
+    const key = `${message.guild.id}:${targetUser.id}`;
+    const notes = staffNotes.get(key) || [];
+
+    notes.push(note);
+    staffNotes.set(key, notes);
+    saveStaffNotes();
+
+    await message.reply(`Saved note **${note.id}** for ${targetUser.tag}.`);
+
+    await sendConfiguredLog(
+        message.guild,
+        getAppConfig(message.guild.id).notesLogChannelId,
+        new EmbedBuilder()
+            .setColor('#FEE75C')
+            .setTitle('Staff Note Added')
+            .addFields(
+                {
+                    name: 'User',
+                    value: `${targetUser.tag} (${targetUser.id})`,
+                    inline: false
+                },
+                {
+                    name: 'Staff',
+                    value: `${message.author.tag} (${message.author.id})`,
+                    inline: false
+                },
+                {
+                    name: 'Note',
+                    value: truncateText(noteText, 1000),
+                    inline: false
+                }
+            )
+            .setTimestamp()
+    );
+
+}
+
+async function handleNotesCommand(message, args) {
+
+    if (!hasModAccess(message.member)) {
+        return message.reply('No permission.');
+    }
+
+    const targetUser = await resolveUserFromArgs(message, args);
+
+    if (!targetUser) {
+        return message.reply('Usage: `!notes @user/userID`');
+    }
+
+    const notes = staffNotes.get(`${message.guild.id}:${targetUser.id}`) || [];
+
+    if (!notes.length) {
+        return message.reply(`No notes saved for ${targetUser.tag}.`);
+    }
+
+    const description = notes.slice(-10).map(note =>
+        `**${note.id}** - <t:${Math.floor(Date.parse(note.createdAt) / 1000)}:R> by <@${note.authorId}>\n${truncateText(note.note, 350)}`
+    ).join('\n\n');
+
+    await message.channel.send({
+        embeds: [
+            new EmbedBuilder()
+                .setColor('#FEE75C')
+                .setTitle(`Staff Notes for ${targetUser.tag}`)
+                .setDescription(description)
+                .setTimestamp()
+        ],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+function getEventKey(guildId, eventId) {
+    return `${guildId}:${eventId}`;
+}
+
+async function handleEventCommand(message, args) {
+
+    const subcommand = args.shift()?.toLowerCase();
+
+    if (subcommand === 'create') {
+
+        if (!hasModAccess(message.member)) {
+            return message.reply('No permission.');
+        }
+
+        const [title, timeText, description] = args.join(' ').split('|').map(part => part?.trim());
+
+        if (!title || !timeText) {
+            return message.reply('Usage: `!event create title | time/date | description`');
+        }
+
+        const eventRecord = {
+            id: crypto.randomBytes(3).toString('hex'),
+            guildId: message.guild.id,
+            title,
+            timeText,
+            description: description || 'No description provided.',
+            createdBy: message.author.id,
+            createdAt: new Date().toISOString(),
+            rsvps: {}
+        };
+
+        vrchatEvents.set(getEventKey(message.guild.id, eventRecord.id), eventRecord);
+        saveVrchatEvents();
+
+        const embed = createVrchatEventEmbed(eventRecord);
+        const targetChannel = getAppConfig(message.guild.id).eventChannelId
+            ? message.guild.channels.cache.get(getAppConfig(message.guild.id).eventChannelId)
+            : message.channel;
+
+        await (targetChannel?.send ? targetChannel : message.channel).send({
+            embeds: [embed]
+        });
+
+        await message.reply(`Created event **${eventRecord.id}**.`);
+        return;
+
+    }
+
+    if (subcommand === 'list' || !subcommand) {
+
+        const events = [...vrchatEvents.values()]
+            .filter(eventRecord => eventRecord.guildId === message.guild.id)
+            .slice(-10);
+
+        if (!events.length) {
+            return message.reply('No VRChat events are saved.');
+        }
+
+        await message.channel.send({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor('#2B90D9')
+                    .setTitle('VRChat Events')
+                    .setDescription(events.map(eventRecord =>
+                        `**${eventRecord.id}** - ${eventRecord.title}\n${eventRecord.timeText}\nRSVPs: ${Object.keys(eventRecord.rsvps || {}).length}`
+                    ).join('\n\n'))
+                    .setTimestamp()
+            ]
+        });
+        return;
+
+    }
+
+    if (subcommand === 'ping') {
+
+        if (!hasModAccess(message.member)) {
+            return message.reply('No permission.');
+        }
+
+        const eventRecord = vrchatEvents.get(getEventKey(message.guild.id, args[0]));
+
+        if (!eventRecord) {
+            return message.reply('I could not find that event ID.');
+        }
+
+        const goingUserIds = Object.entries(eventRecord.rsvps || {})
+            .filter(([, value]) => value === 'yes')
+            .map(([userId]) => userId);
+
+        await message.channel.send({
+            content: goingUserIds.length
+                ? goingUserIds.map(userId => `<@${userId}>`).join(' ')
+                : 'No one has RSVP’d yes yet.',
+            embeds: [createVrchatEventEmbed(eventRecord)],
+            allowedMentions: {
+                users: goingUserIds
+            }
+        });
+        return;
+
+    }
+
+    await message.reply('Usage: `!event create title | time/date | description`, `!event list`, or `!event ping eventId`');
+
+}
+
+function createVrchatEventEmbed(eventRecord) {
+
+    const rsvpCounts = {
+        yes: 0,
+        maybe: 0,
+        no: 0
+    };
+
+    for (const value of Object.values(eventRecord.rsvps || {})) {
+        if (rsvpCounts[value] !== undefined) rsvpCounts[value]++;
+    }
+
+    return new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle(eventRecord.title)
+        .setDescription(eventRecord.description || 'No description provided.')
+        .addFields(
+            {
+                name: 'Event ID',
+                value: eventRecord.id,
+                inline: true
+            },
+            {
+                name: 'When',
+                value: eventRecord.timeText,
+                inline: true
+            },
+            {
+                name: 'RSVP',
+                value: `Yes: ${rsvpCounts.yes} | Maybe: ${rsvpCounts.maybe} | No: ${rsvpCounts.no}`,
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+}
+
+async function handleRsvpCommand(message, args) {
+
+    const eventId = args[0];
+    const response = String(args[1] || '').toLowerCase();
+
+    if (!eventId || !['yes', 'no', 'maybe'].includes(response)) {
+        return message.reply('Usage: `!rsvp eventId yes/no/maybe`');
+    }
+
+    const eventRecord = vrchatEvents.get(getEventKey(message.guild.id, eventId));
+
+    if (!eventRecord) {
+        return message.reply('I could not find that event ID.');
+    }
+
+    eventRecord.rsvps = eventRecord.rsvps || {};
+    eventRecord.rsvps[message.author.id] = response;
+    vrchatEvents.set(getEventKey(message.guild.id, eventRecord.id), eventRecord);
+    saveVrchatEvents();
+
+    await message.reply(`RSVP saved as **${response}** for **${eventRecord.title}**.`);
+
+}
+
+async function handleOnboardingCommand(message, args) {
+
+    if (!hasServerAdminOrOwnerAccess(message.member)) {
+        return message.reply('No permission. Only server admins or the server owner can use this command.');
+    }
+
+    const targetChannel = resolveTextChannelFromArg(message, args[0]) || message.channel;
+    const embed = new EmbedBuilder()
+        .setColor('#2B90D9')
+        .setTitle('Welcome to OverFlow')
+        .setDescription('Start by verifying, reading the rules, choosing your roles, and linking your VRChat account.')
+        .addFields(
+            {
+                name: 'Step 1',
+                value: 'Click the verify button if one is available.'
+            },
+            {
+                name: 'Step 2',
+                value: 'Use `!vrcverify VRChatName`, put the code in your VRChat bio/status, then use `!vrcconfirm`.'
+            },
+            {
+                name: 'Need Help?',
+                value: 'Open a support ticket with `!ticket` or the ticket panel.'
+            }
+        )
+        .setTimestamp();
+
+    await targetChannel.send({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+    setAppConfig(message.guild.id, config => {
+        config.onboardingChannelId = targetChannel.id;
+    });
+
+    await message.reply(`Onboarding message sent to ${targetChannel}.`);
+
+}
+
+async function handleCommunityConfigCommand(message, args) {
+
+    if (!hasServerAdminOrOwnerAccess(message.member)) {
+        return message.reply('No permission. Only server admins or the server owner can use this command.');
+    }
+
+    const section = args[0]?.toLowerCase();
+
+    if (section === 'events') {
+        const channel = resolveTextChannelFromArg(message, args[1]);
+        if (!channel) return message.reply('Usage: `!config events #channel`');
+        setAppConfig(message.guild.id, config => {
+            config.eventChannelId = channel.id;
+        });
+        return message.reply(`Event channel set to ${channel}.`);
+    }
+
+    if (section === 'antiraid') {
+        const enabled = args[1]?.toLowerCase() !== 'off';
+        setAppConfig(message.guild.id, config => {
+            config.antiRaidEnabled = enabled;
+        });
+        return message.reply(`Anti-raid is now **${enabled ? 'on' : 'off'}**.`);
+    }
+
+    if (section === 'nicknames') {
+        const enabled = args[1]?.toLowerCase() !== 'off';
+        setAppConfig(message.guild.id, config => {
+            config.nicknameSyncEnabled = enabled;
+        });
+        return message.reply(`VRC nickname sync is now **${enabled ? 'on' : 'off'}**.`);
+    }
+
+    const appConfig = getAppConfig(message.guild.id);
+    const ticketConfig = getTicketConfig(message.guild.id);
+    const vrcConfig = getVrcVerifyConfig(message.guild.id);
+
+    await message.channel.send({
+        embeds: [
+            new EmbedBuilder()
+                .setColor('#2B90D9')
+                .setTitle('Bot Config Overview')
+                .addFields(
+                    {
+                        name: 'Logs',
+                        value: `<#${LOG_CHANNEL_ID}>`,
+                        inline: true
+                    },
+                    {
+                        name: 'Ticket Category',
+                        value: ticketConfig.categoryId ? `<#${ticketConfig.categoryId}>` : 'None',
+                        inline: true
+                    },
+                    {
+                        name: 'Ticket Logs',
+                        value: ticketConfig.logChannelId ? `<#${ticketConfig.logChannelId}>` : 'Default logs',
+                        inline: true
+                    },
+                    {
+                        name: 'VRC Verified Role',
+                        value: vrcConfig.verifiedRoleId ? `<@&${vrcConfig.verifiedRoleId}>` : 'None',
+                        inline: true
+                    },
+                    {
+                        name: 'Event Channel',
+                        value: appConfig.eventChannelId ? `<#${appConfig.eventChannelId}>` : 'None',
+                        inline: true
+                    },
+                    {
+                        name: 'Systems',
+                        value: `Anti-raid: ${appConfig.antiRaidEnabled ? 'on' : 'off'}\nNickname sync: ${appConfig.nicknameSyncEnabled ? 'on' : 'off'}`,
+                        inline: false
+                    }
+                )
+                .setTimestamp()
+        ],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+async function syncMemberNicknameToVrc(member, vrcDisplayName) {
+
+    const config = getAppConfig(member.guild.id);
+
+    if (!config.nicknameSyncEnabled || !vrcDisplayName) return;
+
+    const botMember = await getBotMember(member.guild);
+
+    if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageNicknames)) return;
+    if (member.roles.highest.comparePositionTo(botMember.roles.highest) >= 0 && member.id !== member.guild.ownerId) return;
+
+    await member.setNickname(vrcDisplayName.slice(0, 32), 'VRChat verification nickname sync.').catch(() => {});
+
+}
+
+async function registerSlashCommandsForGuilds() {
+
+    const slashCommands = [
+        {
+            name: 'ticket',
+            description: 'Open a support ticket',
+            options: [
+                {
+                    name: 'type',
+                    description: 'Ticket type',
+                    type: ApplicationCommandOptionType.String,
+                    required: false,
+                    choices: DEFAULT_TICKET_TYPES.map(type => ({
+                        name: type.label,
+                        value: type.id
+                    }))
+                },
+                {
+                    name: 'reason',
+                    description: 'What do you need help with?',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                }
+            ]
+        },
+        {
+            name: 'vrcverify',
+            description: 'Start VRChat verification',
+            options: [
+                {
+                    name: 'profile',
+                    description: 'VRChat display name or profile URL',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                }
+            ]
+        },
+        {
+            name: 'vrcconfirm',
+            description: 'Confirm VRChat verification'
+        },
+        {
+            name: 'addrole',
+            description: 'Add a role to a member',
+            options: [
+                {
+                    name: 'user',
+                    description: 'Member',
+                    type: ApplicationCommandOptionType.User,
+                    required: true
+                },
+                {
+                    name: 'role',
+                    description: 'Role',
+                    type: ApplicationCommandOptionType.Role,
+                    required: true
+                }
+            ]
+        },
+        {
+            name: 'removerole',
+            description: 'Remove a role from a member',
+            options: [
+                {
+                    name: 'user',
+                    description: 'Member',
+                    type: ApplicationCommandOptionType.User,
+                    required: true
+                },
+                {
+                    name: 'role',
+                    description: 'Role',
+                    type: ApplicationCommandOptionType.Role,
+                    required: true
+                }
+            ]
+        }
+    ];
+
+    for (const guild of client.guilds.cache.values()) {
+        await guild.commands.set(slashCommands).catch(error => {
+            console.error(`Failed to register slash commands for ${guild.id}:`, error);
+        });
+    }
+
+}
+
+async function handleSlashCommand(interaction) {
+
+    if (!interaction.inGuild()) {
+        return interaction.reply({
+            content: 'This command only works in a server.',
+            ephemeral: true
+        });
+    }
+
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => interaction.member);
+
+    if (interaction.commandName === 'ticket') {
+        const type = interaction.options.getString('type') || 'general';
+        const reason = interaction.options.getString('reason') || 'Opened with a slash command.';
+        await interaction.deferReply({
+            ephemeral: true
+        });
+        const result = await createTicketForMember(interaction.guild, member, reason, type).catch(error => ({
+            ok: false,
+            message: error.message
+        }));
+        return interaction.editReply(result.ok ? `Ticket created: ${result.channel}` : result.message);
+    }
+
+    if (interaction.commandName === 'vrcverify') {
+        return handleVrcVerifyStartCommand(createMessageLikeInteraction(interaction, member), [interaction.options.getString('profile')]);
+    }
+
+    if (interaction.commandName === 'vrcconfirm') {
+        return handleVrcConfirmCommand(createMessageLikeInteraction(interaction, member), []);
+    }
+
+    if (interaction.commandName === 'addrole' || interaction.commandName === 'removerole') {
+        const targetMember = interaction.options.getMember('user');
+        const role = interaction.options.getRole('role');
+        return handleRoleSlashCommand(interaction, member, targetMember, role, interaction.commandName === 'addrole');
+    }
+
+}
+
+function createMessageLikeInteraction(interaction, member) {
+
+    return {
+        guild: interaction.guild,
+        member,
+        author: interaction.user,
+        channel: interaction.channel,
+        mentions: {
+            users: {
+                first: () => null
+            },
+            members: {
+                first: () => null
+            },
+            channels: {
+                first: () => null
+            }
+        },
+        reply: async (payload) => {
+            if (interaction.replied || interaction.deferred) return interaction.followUp({
+                ...(typeof payload === 'string' ? { content: payload } : payload),
+                ephemeral: true,
+                fetchReply: true
+            });
+            return interaction.reply({
+                ...(typeof payload === 'string' ? { content: payload } : payload),
+                ephemeral: true,
+                fetchReply: true
+            });
+        }
+    };
+
+}
+
+async function handleRoleSlashCommand(interaction, actingMember, targetMember, role, shouldAddRole) {
+
+    if (!hasServerAdminOrOwnerAccess(actingMember)) {
+        return interaction.reply({
+            content: 'No permission. Only server admins or the server owner can use this command.',
+            ephemeral: true
+        });
+    }
+
+    if (!targetMember || !role) {
+        return interaction.reply({
+            content: 'Missing member or role.',
+            ephemeral: true
+        });
+    }
+
+    const botMember = await getBotMember(interaction.guild);
+
+    if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageRoles) ||
+        !canBotAssignRole(botMember, interaction.guild, role)) {
+        return interaction.reply({
+            content: `I cannot manage **${role.name}**. Check my Manage Roles permission and role position.`,
+            ephemeral: true
+        });
+    }
+
+    if (actingMember.id !== interaction.guild.ownerId && actingMember.roles.highest.comparePositionTo(role) <= 0) {
+        return interaction.reply({
+            content: 'You cannot manage a role equal to or higher than your highest role.',
+            ephemeral: true
+        });
+    }
+
+    if (shouldAddRole) {
+        await targetMember.roles.add(role, `Role added by ${interaction.user.tag}`);
+    } else {
+        await targetMember.roles.remove(role, `Role removed by ${interaction.user.tag}`);
+    }
+
+    await interaction.reply({
+        content: `${shouldAddRole ? 'Added' : 'Removed'} **${role.name}** ${shouldAddRole ? 'to' : 'from'} ${targetMember}.`,
+        ephemeral: true
+    });
 
 }
 
@@ -4524,6 +5558,8 @@ client.on('guildMemberAdd', async (member) => {
 
     try {
 
+        await handleAntiRaidJoin(member);
+
         const role = member.guild.roles.cache.get(AUTO_ROLE_ID);
 
         if (role) {
@@ -4799,6 +5835,10 @@ client.on('messageCreate', async (message) => {
 
     const args = message.content.trim().split(/ +/);
     const command = args.shift()?.toLowerCase();
+
+    if (!message.content.startsWith('!') && await handleAntiRaidMessage(message)) {
+        return;
+    }
     // ==========================================
     // VRCHAT COMMUNITY INFO COMMAND
     // ==========================================
@@ -4891,6 +5931,52 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
     }
 
     // ==========================================
+    // COMMUNITY SYSTEM COMMANDS
+    // ==========================================
+
+    if (command === '!note') {
+        await handleNoteCommand(message, args);
+        return;
+    }
+
+    if (command === '!notes') {
+        await handleNotesCommand(message, args);
+        return;
+    }
+
+    if (command === '!event' || command === '!vrcevent') {
+        await handleEventCommand(message, args);
+        return;
+    }
+
+    if (command === '!rsvp') {
+        await handleRsvpCommand(message, args);
+        return;
+    }
+
+    if (command === '!onboarding' || command === '!welcome-setup') {
+        await handleOnboardingCommand(message, args);
+        return;
+    }
+
+    if (command === '!config') {
+        await handleCommunityConfigCommand(message, args);
+        return;
+    }
+
+    if (command === '!syncnick' || command === '!syncnickname') {
+        const record = vrcVerificationRecords.get(getVrcVerifyKey(message.guild.id, message.author.id));
+
+        if (!record) {
+            return message.reply('Verify your VRChat account first with `!vrcverify`.');
+        }
+
+        await syncMemberNicknameToVrc(message.member, record.vrcDisplayName);
+        await message.reply('Nickname sync attempted.');
+        return;
+    }
+
+    // ==========================================
     // HELP COMMAND
     // ==========================================
 
@@ -4914,7 +6000,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 🔹 \`!reactionrole #channel emoji @role message\` - Creates a reaction role message.
 🔹 \`!reactionrole #channel message | emoji @role | emoji @role\` - Creates one message with multiple reaction roles.
 🔹 \`!vrchat\` / \`!vrc\` - Shows VRChat community info.
-🎫 \`!ticket [reason]\` - Opens a private support ticket.
+🎫 \`!ticket [type] [reason]\` - Opens a private support ticket.
 🔐 \`!vrcverify VRChatName\` - Starts VRChat account verification.`
                 },
                 {
@@ -4923,20 +6009,33 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 `\`!vrcverify VRChatName\` - Starts profile-code verification.
 \`!vrcconfirm [VRChatName]\` - Checks your profile and gives the verified role.
 \`!vrclinked [@user/userID]\` - Shows a linked VRChat account.
+\`!syncnick\` - Syncs your nickname to your verified VRChat name.
 \`!vrcverifyconfig\` - Admin config for verified role and logs.
 \`!vrcunverify @user/userID\` - Removes a saved VRC verification.`
                 },
                 {
                     name: '🎫 Ticket Commands',
                     value:
-`\`!ticketsetup [#channel]\` - Creates the open-ticket button panel.
+`\`!ticket [type] [reason]\` - Opens general/report/partnership/appeal/admin.
+\`!appeal [reason]\` - Opens an appeal ticket.
+\`!ticketsetup [#channel]\` - Creates the ticket type button panel.
 \`!ticketconfig\` - Shows and edits ticket support/admin roles.
-\`!close [reason]\` - Saves a transcript and closes the ticket.
+\`!close [reason | 1-5]\` - Saves a transcript and closes the ticket.
+\`!rateticket 1-5 [comment]\` - Rates your ticket before close.
 \`!transcript [reason]\` - Sends a ticket transcript to logs.
 \`!claim\` / \`!unclaim\` - Claims or releases a ticket.
 \`!add @user\` / \`!remove @user\` - Adds or removes a user.
 \`!rename name\` - Renames the ticket.
 \`!escalate [reason]\` - Requests an admin.`
+                },
+                {
+                    name: '🌐 Community Systems',
+                    value:
+`\`!event create title | time | description\` - Creates a VRChat event.
+\`!event list\` / \`!rsvp eventId yes/no/maybe\` - Event RSVP tools.
+\`!note @user note\` / \`!notes @user\` - Staff notes.
+\`!onboarding [#channel]\` - Sends the welcome/onboarding message.
+\`!config\` - Shows bot config, anti-raid, tickets, VRC, and events.`
                 },
                 {
                     name: '🎉 Fun Commands',
@@ -5055,6 +6154,16 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!ticket' || command === '!new' || command === '!openticket') {
         await handleTicketOpenCommand(message, args);
+        return;
+    }
+
+    if (command === '!appeal') {
+        await handleTicketOpenCommand(message, ['appeal', ...args]);
+        return;
+    }
+
+    if (command === '!rateticket' || command === '!ticketrating') {
+        await handleTicketRatingCommand(message, args);
         return;
     }
 
@@ -6874,6 +7983,11 @@ client.on('messageReactionRemove', async (reaction, user) => {
 // ==========================================
 
 client.on('interactionCreate', async (interaction) => {
+
+    if (interaction.isChatInputCommand()) {
+        await handleSlashCommand(interaction);
+        return;
+    }
 
     if (!interaction.isButton()) return;
 
