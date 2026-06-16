@@ -1199,10 +1199,60 @@ async function askGemini(question, username = 'Discord user') {
 
 }
 
+function normalizeAskQuestion(question) {
+
+    return String(question || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+}
+
+function isBotCreatorQuestion(question) {
+
+    const normalizedQuestion = normalizeAskQuestion(question);
+
+    if (!normalizedQuestion) return false;
+
+    const creatorTerms = [
+        'created',
+        'made',
+        'built',
+        'coded',
+        'programmed',
+        'developed',
+        'designed',
+        'creator',
+        'owner',
+        'owns'
+    ];
+
+    const botTerms = [
+        'you',
+        'your',
+        'yourself',
+        'bot',
+        'discord bot',
+        'ovf helper'
+    ];
+
+    return (
+        normalizedQuestion.includes('who') &&
+        creatorTerms.some(term => normalizedQuestion.includes(term)) &&
+        botTerms.some(term => normalizedQuestion.includes(term))
+    );
+
+}
+
 async function sendAskResponse(message, question) {
 
     if (!question || !question.trim()) {
         return message.reply('⚠️ Ask a question. Example: `!ask how do I make a Discord bot?`');
+    }
+
+    if (isBotCreatorQuestion(question)) {
+        return message.reply('🤖 The creator of this Discord bot is **Bqbblz**.');
     }
 
     if (!GEMINI_API_KEY) {
