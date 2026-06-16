@@ -2350,9 +2350,25 @@ client.on('messageCreate', async (message) => {
 
         await message.channel.send(
 `# ${VRCHAT_SERVER_NAME}
-**Focus:** VRChat meetups, worlds, avatars, events, and community hangouts.
-**Link:** ${VRCHAT_COMMUNITY_LINK}
-**Reminder:** Use the Discord channels for event planning, world suggestions, avatar help, and support.`
+### :sparkles: **OverFlow | 18+ VRChat Community** :sparkles:
+
+Looking for a chill VRChat group where you can relax, meet new people, and enjoy events without pressure or strict roleplay expectations? OverFlow might be the place for you!
+
+OverFlow is an 18+ VRChat community focused on socializing, entertainment, events, and creative expression. Whether you enjoy hanging out in voice chat, attending community events, sharing your creativity, or simply making new friends, we aim to provide a welcoming space where everyone can feel comfortable being themselves.
+
+## What we offer:
+
+- A relaxed and friendly 18+ community
+- VRChat hangouts and social events
+- Entertainment and creative spaces
+- No roleplay jobs or strict activity requirements
+- A place to meet people and be yourself
+
+## Come join OverFlow and be part of a community built around comfort, creativity, and connection.
+
+## Join us today!
+[Discord](https://discord.gg/N5WvpFuYNF)
+[VRC Group](https://vrchat.com/home/group/grp_38f88b33-f022-40b8-8acf-5264f5e710a2)`
         );
 
         return;
