@@ -4338,7 +4338,11 @@ function readJsonArrayFile(filePath) {
     if (!fs.existsSync(filePath)) return [];
 
     try {
-        const payload = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const rawPayload = fs.readFileSync(filePath, 'utf8').trim();
+
+        if (!rawPayload) return [];
+
+        const payload = JSON.parse(rawPayload);
         return Array.isArray(payload) ? payload : [];
     } catch (error) {
         console.error(`Failed to read ${filePath}:`, error);
