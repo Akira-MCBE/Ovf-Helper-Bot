@@ -85,6 +85,7 @@ const XP_PER_TRACKED_MESSAGE = Math.max(
 );
 const XP_HISTORY_PAGE_SIZE = 100;
 const XP_HISTORY_STATUS_INTERVAL_MS = 10 * 1000;
+const TOP_LEVELS_PAGE_SIZE = 10;
 const ANTI_RAID_JOIN_WINDOW_MS = 60 * 1000;
 const ANTI_RAID_JOIN_LIMIT = 5;
 const ANTI_RAID_MESSAGE_WINDOW_MS = 10 * 1000;
@@ -3750,6 +3751,7 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'ticketconfig',
     'ticketsetup',
     'timeout',
+    'toplevels',
     'transcript',
     'unclaim',
     'unmute',
@@ -4910,6 +4912,92 @@ async function handleRankCommand(message, args) {
                 .setTimestamp()
         ]
     });
+
+}
+
+function clampTopLevelsPage(page, totalPages) {
+    return Math.min(Math.max(page, 0), Math.max(totalPages - 1, 0));
+}
+
+async function createTopLevelsPayload(guild, requesterId, page = 0) {
+
+    const rankEntries = getXpRankEntries(guild.id);
+    const totalPages = Math.max(1, Math.ceil(rankEntries.length / TOP_LEVELS_PAGE_SIZE));
+    const safePage = clampTopLevelsPage(page, totalPages);
+    const startIndex = safePage * TOP_LEVELS_PAGE_SIZE;
+    const pageEntries = rankEntries.slice(startIndex, startIndex + TOP_LEVELS_PAGE_SIZE);
+    const users = await Promise.all(
+        pageEntries.map(entry => client.users.fetch(entry.userId).catch(() => null))
+    );
+    const description = pageEntries.length
+        ? pageEntries.map((entry, index) => {
+            const user = users[index];
+            const label = user ? user.tag : `<@${entry.userId}>`;
+            const place = startIndex + index + 1;
+
+            return `#${place} - ${label} | Level ${getXpLevel(entry.xp)} | ${entry.xp || 0} XP | ${entry.messages || 0} messages`;
+        }).join('\n')
+        : 'No level data yet. Use `!synclevels` to backfill old messages, or wait for new messages to be tracked.';
+
+    const embed = new EmbedBuilder()
+        .setColor('#57F287')
+        .setTitle('Top Levels')
+        .setDescription(description)
+        .setFooter({
+            text: `Page ${safePage + 1} of ${totalPages} | ${rankEntries.length} ranked user(s)`
+        })
+        .setTimestamp();
+
+    return {
+        embeds: [embed],
+        components: [createTopLevelsPaginationRow(requesterId, safePage, totalPages)]
+    };
+
+}
+
+function createTopLevelsPaginationRow(requesterId, page, totalPages) {
+
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`toplevels:${requesterId}:${Math.max(page - 1, 0)}`)
+            .setLabel('Previous')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page <= 0),
+        new ButtonBuilder()
+            .setCustomId(`toplevels:${requesterId}:${Math.min(page + 1, totalPages - 1)}`)
+            .setLabel('Next')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page >= totalPages - 1)
+    );
+
+}
+
+async function handleTopLevelsCommand(message, args) {
+
+    const requestedPage = Number.parseInt(args[0] || '1', 10);
+    const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage - 1 : 0;
+    const payload = await createTopLevelsPayload(message.guild, message.author.id, page);
+
+    await message.channel.send(payload);
+
+}
+
+async function handleTopLevelsButton(interaction) {
+
+    const [, requesterId, pageText] = interaction.customId.split(':');
+
+    if (interaction.user.id !== requesterId) {
+        return interaction.reply({
+            content: 'Only the person who opened this leaderboard can change its page.',
+            ephemeral: true
+        });
+    }
+
+    const requestedPage = Number.parseInt(pageText || '0', 10);
+    const page = Number.isFinite(requestedPage) && requestedPage >= 0 ? requestedPage : 0;
+    const payload = await createTopLevelsPayload(interaction.guild, requesterId, page);
+
+    await interaction.update(payload);
 
 }
 
@@ -7713,6 +7801,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         return;
     }
 
+    if (command === '!toplevels' || command === '!levelboard' || command === '!levels') {
+        await handleTopLevelsCommand(message, args);
+        return;
+    }
+
     if (command === '!synclevels' || command === '!levelsync' || command === '!backfilllevels') {
         await handleSyncLevelsCommand(message, args);
         return;
@@ -7804,6 +7897,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!giveaway create prize | 1d | winners\` - Giveaways.
 \`!poll question | option 1 | option 2\` - Button polls.
 \`!rank [@user]\` - XP/rank.
+\`!toplevels [page]\` - Shows paged level leaderboard.
 \`!synclevels [max-per-channel]\` - Admin: backfills levels from message history.
 \`!staffapply [details]\` / \`!suggest idea\` - Applications and suggestions.
 \`!automod on/off\` / \`!automod block phrase\` - Auto moderation.
@@ -9774,6 +9868,11 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (!interaction.isButton()) return;
+
+    if (interaction.customId.startsWith('toplevels:')) {
+        await handleTopLevelsButton(interaction);
+        return;
+    }
 
     if (interaction.customId.startsWith('giveaway_join:')) {
         await handleGiveawayButton(interaction);
