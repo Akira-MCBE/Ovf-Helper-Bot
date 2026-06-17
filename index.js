@@ -81,6 +81,10 @@ const XP_FILE = path.join(process.cwd(), 'xp.json');
 const SUGGESTIONS_FILE = path.join(process.cwd(), 'suggestions.json');
 const WAIFU_GAME_FILE = path.join(process.cwd(), 'waifu-game.json');
 const WAIFU_IMAGE_DIR = path.join(process.cwd(), 'waifu-images');
+const WAIFU_SOURCE_IMAGE_DIR = process.env.WAIFU_SOURCE_IMAGE_DIR ||
+    process.env.WAIFU_PULL_IMAGE_DIR ||
+    path.join(process.cwd(), 'waifu-pull-images');
+const WAIFU_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
 const XP_PER_TRACKED_MESSAGE = Math.max(
     1,
     Number.parseInt(process.env.XP_PER_TRACKED_MESSAGE || '20', 10) || 20
@@ -92,7 +96,16 @@ const WAIFU_DAILY_AMOUNT = 500;
 const WAIFU_DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const WAIFU_PULL_COST = 100;
 const WAIFU_COLLECTION_PAGE_SIZE = 10;
-const WAIFU_IMAGE_PROVIDER = (process.env.WAIFU_IMAGE_PROVIDER || 'pollinations').toLowerCase();
+const WAIFU_IMAGE_PROVIDER = (process.env.WAIFU_IMAGE_PROVIDER || 'folder').toLowerCase();
+const WAIFU_SHINY_CHANCE_PERCENT = Math.max(
+    0,
+    Number.parseFloat(process.env.WAIFU_SHINY_CHANCE_PERCENT || '2') || 2
+);
+const WAIFU_SHINY_VALUE_MULTIPLIER = Math.max(
+    1,
+    Number.parseFloat(process.env.WAIFU_SHINY_VALUE_MULTIPLIER || '5') || 5
+);
+const WAIFU_TRADE_TTL_MS = 5 * 60 * 1000;
 const POLLINATIONS_IMAGE_MODEL = process.env.POLLINATIONS_IMAGE_MODEL || 'flux';
 const POLLINATIONS_IMAGE_WIDTH = Number.parseInt(process.env.POLLINATIONS_IMAGE_WIDTH || '768', 10) || 768;
 const POLLINATIONS_IMAGE_HEIGHT = Number.parseInt(process.env.POLLINATIONS_IMAGE_HEIGHT || '1024', 10) || 1024;
@@ -233,6 +246,7 @@ const polls = new Map();
 const xpRecords = new Map();
 const suggestions = new Map();
 const waifuPlayers = new Map();
+const pendingWaifuTrades = new Map();
 const antiRaidJoinTimestamps = new Map();
 const antiRaidMessageTimestamps = new Map();
 let eventReminderInterval = null;
@@ -3828,6 +3842,7 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'onboarding',
     'odds',
     'pause',
+    'pay',
     'ping',
     'play',
     'poll',
@@ -3850,6 +3865,9 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'rank',
     'serverinfo',
     'setup-roles',
+    'sell',
+    'sellcard',
+    'sellwaifu',
     'ship',
     'skip',
     'staffapply',
@@ -3863,6 +3881,7 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'ticketsetup',
     'timeout',
     'toplevels',
+    'trade',
     'transcript',
     'unclaim',
     'unmute',
@@ -4276,8 +4295,10 @@ function normalizeWaifuRecord(record = {}) {
         rarityLabel: String(record.rarityLabel || 'Common'),
         color: String(record.color || '#95A5A6'),
         value: Math.max(0, Number.parseInt(record.value || '0', 10) || 0),
+        shiny: record.shiny === true,
         prompt: String(record.prompt || ''),
         imageFileName: record.imageFileName ? String(record.imageFileName) : null,
+        sourceImageFileName: record.sourceImageFileName ? String(record.sourceImageFileName) : null,
         createdAt: record.createdAt || new Date().toISOString()
     };
 
@@ -4363,6 +4384,10 @@ function pickWaifuRarity() {
 
 }
 
+function rollWaifuShiny() {
+    return Math.random() * 100 < WAIFU_SHINY_CHANCE_PERCENT;
+}
+
 function createWaifuPrompt(waifu) {
 
     return [
@@ -4379,6 +4404,7 @@ function createWaifuPrompt(waifu) {
 function createWaifuRecord(ownerId) {
 
     const rarity = pickWaifuRarity();
+    const shiny = rollWaifuShiny();
     const firstName = getRandomItem(WAIFU_FIRST_NAMES);
     const title = getRandomItem(WAIFU_TITLES);
     const aesthetic = getRandomItem(WAIFU_AESTHETICS);
@@ -4389,11 +4415,13 @@ function createWaifuRecord(ownerId) {
         title,
         aesthetic,
         rarity: rarity.id,
-        rarityLabel: rarity.label,
-        color: rarity.color,
-        value: rarity.value,
+        rarityLabel: shiny ? `Shiny ${rarity.label}` : rarity.label,
+        color: shiny ? '#FFF176' : rarity.color,
+        value: shiny ? Math.round(rarity.value * WAIFU_SHINY_VALUE_MULTIPLIER) : rarity.value,
+        shiny,
         prompt: '',
         imageFileName: null,
+        sourceImageFileName: null,
         createdAt: new Date().toISOString()
     };
 
@@ -4427,6 +4455,50 @@ function saveWaifuImage(waifu, imageData) {
     waifu.imageFileName = fileName;
 
     return filePath;
+
+}
+
+function getWaifuSourceImageFiles() {
+
+    if (!fs.existsSync(WAIFU_SOURCE_IMAGE_DIR)) {
+        fs.mkdirSync(WAIFU_SOURCE_IMAGE_DIR, {
+            recursive: true
+        });
+        return [];
+    }
+
+    return fs.readdirSync(WAIFU_SOURCE_IMAGE_DIR, {
+        withFileTypes: true
+    })
+        .filter(entry => entry.isFile())
+        .map(entry => entry.name)
+        .filter(fileName => WAIFU_IMAGE_EXTENSIONS.includes(path.extname(fileName).toLowerCase()));
+
+}
+
+function copyWaifuImageFromFolder(waifu) {
+
+    const imageFiles = getWaifuSourceImageFiles();
+
+    if (!imageFiles.length) {
+        throw new Error(`No waifu images found. Add PNG/JPG/WEBP files to ${WAIFU_SOURCE_IMAGE_DIR}`);
+    }
+
+    fs.mkdirSync(WAIFU_IMAGE_DIR, {
+        recursive: true
+    });
+
+    const sourceFileName = getRandomItem(imageFiles);
+    const sourcePath = path.join(WAIFU_SOURCE_IMAGE_DIR, sourceFileName);
+    const extension = path.extname(sourceFileName).toLowerCase();
+    const targetFileName = `${waifu.id}${extension}`;
+    const targetPath = path.join(WAIFU_IMAGE_DIR, targetFileName);
+
+    fs.copyFileSync(sourcePath, targetPath);
+    waifu.imageFileName = targetFileName;
+    waifu.sourceImageFileName = sourceFileName;
+
+    return targetPath;
 
 }
 
@@ -4592,7 +4664,18 @@ async function generateWaifuImage(prompt) {
         return callPollinationsImageModel(prompt);
     }
 
-    throw new Error(`Unknown WAIFU_IMAGE_PROVIDER "${WAIFU_IMAGE_PROVIDER}". Use "pollinations" or "gemini".`);
+    throw new Error(`Unknown WAIFU_IMAGE_PROVIDER "${WAIFU_IMAGE_PROVIDER}". Use "folder", "pollinations", or "gemini".`);
+
+}
+
+async function assignWaifuImage(waifu) {
+
+    if (WAIFU_IMAGE_PROVIDER === 'folder') {
+        return copyWaifuImageFromFolder(waifu);
+    }
+
+    const imageData = await generateWaifuImage(waifu.prompt);
+    return saveWaifuImage(waifu, imageData);
 
 }
 
@@ -4622,6 +4705,16 @@ function buildWaifuPayload(ownerUser, player, waifu, heading = 'Waifu Pull') {
             {
                 name: 'Balance',
                 value: `${player.coins} coins`,
+                inline: true
+            },
+            {
+                name: 'Variant',
+                value: waifu.shiny ? `Shiny (${WAIFU_SHINY_CHANCE_PERCENT}% chance)` : 'Standard',
+                inline: true
+            },
+            {
+                name: 'Source',
+                value: waifu.sourceImageFileName ? `\`${truncateText(waifu.sourceImageFileName, 80)}\`` : WAIFU_IMAGE_PROVIDER,
                 inline: true
             }
         )
@@ -4681,18 +4774,21 @@ async function handleWaifuPullCommand(message) {
         return message.reply(`You need **${WAIFU_PULL_COST} coins** to pull. Your balance is **${player.coins} coins**. Use \`!daily\` to claim coins.`);
     }
 
-    const statusMessage = await message.reply('Summoning a custom AI waifu...');
+    const statusMessage = await message.reply(
+        WAIFU_IMAGE_PROVIDER === 'folder'
+            ? 'Opening the waifu vault...'
+            : 'Summoning a custom AI waifu...'
+    );
     const waifu = createWaifuRecord(message.author.id);
 
     try {
 
-        const imageData = await generateWaifuImage(waifu.prompt);
-        saveWaifuImage(waifu, imageData);
+        await assignWaifuImage(waifu);
 
     } catch (error) {
 
-        console.error('Waifu image generation failed:', error);
-        await statusMessage.edit(`Image generation failed, so no coins were spent. ${truncateText(error.message, 250)}`).catch(() => {});
+        console.error('Waifu image assignment failed:', error);
+        await statusMessage.edit(`Waifu pull failed, so no coins were spent. ${truncateText(error.message, 250)}`).catch(() => {});
         return;
 
     }
@@ -4726,7 +4822,7 @@ async function handleWaifuCollectionCommand(message, args) {
         ? waifus.map((waifu, index) =>
             `#${startIndex + index + 1} - **${waifu.name}** | ${waifu.rarityLabel} | ${waifu.value} coins | \`${waifu.id}\``
         ).join('\n')
-        : 'No waifus yet. Use `!daily`, then `!pull`.';
+        : `No waifus yet. Add images to \`${WAIFU_SOURCE_IMAGE_DIR}\`, use \`!daily\`, then \`!pull\`.`;
 
     const embed = new EmbedBuilder()
         .setColor('#FF5FA2')
@@ -4806,6 +4902,430 @@ async function handleGiveCoinsCommand(message, args) {
 
 }
 
+function findWaifuCardByReference(player, reference) {
+
+    const lookup = String(reference || '').trim();
+
+    if (!lookup) return null;
+
+    const index = Number.parseInt(lookup, 10);
+
+    if (/^\d+$/.test(lookup) && index > 0) {
+        return {
+            waifu: player.collection[index - 1] || null,
+            index: index - 1
+        };
+    }
+
+    const normalizedLookup = lookup.toLowerCase();
+    const indexById = player.collection.findIndex(waifu =>
+        waifu.id.toLowerCase().startsWith(normalizedLookup)
+    );
+
+    return {
+        waifu: indexById >= 0 ? player.collection[indexById] : null,
+        index: indexById
+    };
+
+}
+
+function parseWaifuCoinToken(token) {
+
+    const value = String(token || '').trim().toLowerCase();
+    const match = value.match(/^(?:coins?|money|cash):(\d+)$/) ||
+        value.match(/^\$(\d+)$/) ||
+        value.match(/^(\d+)(?:c|coins?|money|cash)$/);
+
+    return match ? Number.parseInt(match[1], 10) : null;
+
+}
+
+function parseWaifuTradeSide(player, sideText) {
+
+    const result = {
+        coins: 0,
+        cardIds: [],
+        cards: [],
+        errors: []
+    };
+    const tokens = String(sideText || '')
+        .replace(/,/g, ' ')
+        .split(/\s+/)
+        .map(token => token.trim())
+        .filter(Boolean);
+    const seenCardIds = new Set();
+
+    for (let i = 0; i < tokens.length; i++) {
+
+        const token = tokens[i];
+        const lowerToken = token.toLowerCase();
+
+        if (['coin', 'coins', 'money', 'cash'].includes(lowerToken)) {
+
+            const nextAmount = Number.parseInt(tokens[i + 1] || '', 10);
+
+            if (!Number.isFinite(nextAmount) || nextAmount < 1) {
+                result.errors.push(`Invalid coin amount after "${token}".`);
+                continue;
+            }
+
+            result.coins += nextAmount;
+            i++;
+            continue;
+
+        }
+
+        const coinAmount = parseWaifuCoinToken(token);
+
+        if (coinAmount !== null) {
+
+            if (coinAmount < 1) {
+                result.errors.push(`Invalid coin amount "${token}".`);
+                continue;
+            }
+
+            result.coins += coinAmount;
+            continue;
+
+        }
+
+        const found = findWaifuCardByReference(player, token);
+
+        if (!found?.waifu) {
+            result.errors.push(`Could not find card "${token}".`);
+            continue;
+        }
+
+        if (seenCardIds.has(found.waifu.id)) {
+            result.errors.push(`Card "${token}" was listed more than once.`);
+            continue;
+        }
+
+        seenCardIds.add(found.waifu.id);
+        result.cardIds.push(found.waifu.id);
+        result.cards.push(found.waifu);
+
+    }
+
+    return result;
+
+}
+
+function hasWaifuTradeItems(side) {
+    return (side.coins || 0) > 0 || side.cardIds.length > 0;
+}
+
+function formatWaifuTradeSide(side, user) {
+
+    const parts = [];
+
+    if (side.cardIds.length) {
+        parts.push(side.cards.map(waifu => `**${waifu.name}** (${waifu.rarityLabel}, \`${waifu.id}\`)`).join('\n'));
+    }
+
+    if (side.coins > 0) {
+        parts.push(`**${side.coins} coins**`);
+    }
+
+    return parts.length ? parts.join('\n') : `${user} gives nothing`;
+
+}
+
+function removeWaifuCardsFromPlayer(player, cardIds) {
+
+    const cardIdSet = new Set(cardIds);
+    const removedCards = [];
+
+    player.collection = player.collection.filter(waifu => {
+
+        if (!cardIdSet.has(waifu.id)) return true;
+
+        removedCards.push(waifu);
+        return false;
+
+    });
+
+    return removedCards;
+
+}
+
+function getWaifuCardsByIds(player, cardIds) {
+    return cardIds.map(cardId => player.collection.find(waifu => waifu.id === cardId)).filter(Boolean);
+}
+
+function validateWaifuTradeState(trade, fromPlayer, toPlayer) {
+
+    const fromCards = getWaifuCardsByIds(fromPlayer, trade.from.cardIds);
+    const toCards = getWaifuCardsByIds(toPlayer, trade.to.cardIds);
+
+    if (fromCards.length !== trade.from.cardIds.length) {
+        return 'The sender no longer owns all offered cards.';
+    }
+
+    if (toCards.length !== trade.to.cardIds.length) {
+        return 'The receiver no longer owns all requested cards.';
+    }
+
+    if (fromPlayer.coins < trade.from.coins) {
+        return 'The sender no longer has enough coins.';
+    }
+
+    if (toPlayer.coins < trade.to.coins) {
+        return 'The receiver no longer has enough coins.';
+    }
+
+    return null;
+
+}
+
+async function handlePayWaifuCoinsCommand(message, args) {
+
+    const targetUser = await resolveUserFromArgs(message, args);
+
+    if (!targetUser) {
+        return message.reply('Usage: `!pay @user amount`');
+    }
+
+    if (targetUser.bot || targetUser.id === message.author.id) {
+        return message.reply('Choose another real user to pay.');
+    }
+
+    const targetArgIndex = args.findIndex(arg => getUserIdFromArg(arg) === targetUser.id);
+    const amountArg = args.slice(Math.max(targetArgIndex + 1, 0)).find(arg => /^\d+$/.test(arg));
+    const amount = Number.parseInt(amountArg || '', 10);
+
+    if (!Number.isFinite(amount) || amount < 1) {
+        return message.reply('Choose a coin amount greater than 0. Example: `!pay @user 250`');
+    }
+
+    const sender = getOrCreateWaifuPlayer(message.guild.id, message.author.id);
+    const receiver = getOrCreateWaifuPlayer(message.guild.id, targetUser.id);
+
+    if (sender.coins < amount) {
+        return message.reply(`You only have **${sender.coins} coins**.`);
+    }
+
+    sender.coins -= amount;
+    receiver.coins += amount;
+    waifuPlayers.set(getWaifuPlayerKey(sender.guildId, sender.userId), sender);
+    waifuPlayers.set(getWaifuPlayerKey(receiver.guildId, receiver.userId), receiver);
+    saveWaifuPlayers();
+
+    await message.reply(`Paid **${amount} coins** to ${targetUser}. Your balance: **${sender.coins} coins**.`);
+
+}
+
+async function handleSellWaifuCommand(message, args) {
+
+    const lookup = args[0];
+
+    if (!lookup) {
+        return message.reply('Usage: `!sellwaifu number-or-id`');
+    }
+
+    const player = getOrCreateWaifuPlayer(message.guild.id, message.author.id);
+    const found = findWaifuCardByReference(player, lookup);
+
+    if (!found?.waifu || found.index < 0) {
+        return message.reply('I could not find that waifu in your collection.');
+    }
+
+    const [soldWaifu] = player.collection.splice(found.index, 1);
+    player.coins += soldWaifu.value || 0;
+    waifuPlayers.set(getWaifuPlayerKey(player.guildId, player.userId), player);
+    saveWaifuPlayers();
+
+    await message.reply(`Sold **${soldWaifu.name}** (${soldWaifu.rarityLabel}) for **${soldWaifu.value || 0} coins**. Balance: **${player.coins} coins**.`);
+
+}
+
+async function handleWaifuTradeCommand(message, args) {
+
+    const targetUser = await resolveUserFromArgs(message, args);
+
+    if (!targetUser) {
+        return message.reply('Usage: `!trade @user yourCards/coins | theirCards/coins`\nExample: `!trade @user 1 2 100c | 4 50c`');
+    }
+
+    if (targetUser.bot || targetUser.id === message.author.id) {
+        return message.reply('Choose another real user to trade with.');
+    }
+
+    const targetArgIndex = args.findIndex(arg => getUserIdFromArg(arg) === targetUser.id);
+    const tradeText = args
+        .filter((_, index) => index !== targetArgIndex)
+        .join(' ')
+        .replace(/<@!?\d{17,20}>/, '')
+        .trim();
+    const [fromText, toText] = tradeText.split('|').map(part => part.trim());
+
+    if (!fromText || !toText) {
+        return message.reply('Usage: `!trade @user yourCards/coins | theirCards/coins`\nUse coin formats like `100c`, `$100`, or `coins:100`.');
+    }
+
+    const fromPlayer = getOrCreateWaifuPlayer(message.guild.id, message.author.id);
+    const toPlayer = getOrCreateWaifuPlayer(message.guild.id, targetUser.id);
+    const fromSide = parseWaifuTradeSide(fromPlayer, fromText);
+    const toSide = parseWaifuTradeSide(toPlayer, toText);
+    const errors = [...fromSide.errors, ...toSide.errors];
+
+    if (errors.length) {
+        return message.reply(errors.slice(0, 5).join('\n'));
+    }
+
+    if (!hasWaifuTradeItems(fromSide) || !hasWaifuTradeItems(toSide)) {
+        return message.reply('Both sides of a trade need at least one card or coin amount.');
+    }
+
+    if (fromPlayer.coins < fromSide.coins) {
+        return message.reply(`You only have **${fromPlayer.coins} coins**.`);
+    }
+
+    if (toPlayer.coins < toSide.coins) {
+        return message.reply(`${targetUser} only has **${toPlayer.coins} coins**.`);
+    }
+
+    const tradeId = crypto.randomBytes(4).toString('hex');
+    const expiresAt = Date.now() + WAIFU_TRADE_TTL_MS;
+    const trade = {
+        id: tradeId,
+        guildId: message.guild.id,
+        channelId: message.channel.id,
+        fromUserId: message.author.id,
+        toUserId: targetUser.id,
+        from: {
+            coins: fromSide.coins,
+            cardIds: fromSide.cardIds
+        },
+        to: {
+            coins: toSide.coins,
+            cardIds: toSide.cardIds
+        },
+        createdAt: new Date().toISOString(),
+        expiresAt
+    };
+
+    pendingWaifuTrades.set(tradeId, trade);
+
+    setTimeout(() => {
+        pendingWaifuTrades.delete(tradeId);
+    }, WAIFU_TRADE_TTL_MS).unref?.();
+
+    const embed = new EmbedBuilder()
+        .setColor('#FF5FA2')
+        .setTitle('Waifu Trade Offer')
+        .setDescription(`${message.author} wants to trade with ${targetUser}.`)
+        .addFields(
+            {
+                name: `${message.author.username} gives`,
+                value: truncateText(formatWaifuTradeSide(fromSide, message.author), 1000),
+                inline: false
+            },
+            {
+                name: `${targetUser.username} gives`,
+                value: truncateText(formatWaifuTradeSide(toSide, targetUser), 1000),
+                inline: false
+            }
+        )
+        .setFooter({
+            text: `Expires in ${Math.floor(WAIFU_TRADE_TTL_MS / 60000)} minutes`
+        })
+        .setTimestamp();
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`waifu_trade_accept:${tradeId}`)
+            .setLabel('Accept')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`waifu_trade_decline:${tradeId}`)
+            .setLabel('Decline')
+            .setStyle(ButtonStyle.Danger)
+    );
+
+    await message.channel.send({
+        content: `${targetUser}, trade offer from ${message.author}.`,
+        embeds: [embed],
+        components: [row]
+    });
+
+}
+
+async function handleWaifuTradeButton(interaction) {
+
+    const [action, tradeId] = interaction.customId.split(':');
+    const trade = pendingWaifuTrades.get(tradeId);
+
+    if (!trade) {
+        return interaction.reply({
+            content: 'That trade offer expired or was already handled.',
+            ephemeral: true
+        });
+    }
+
+    if (interaction.user.id !== trade.toUserId) {
+        return interaction.reply({
+            content: 'Only the trade receiver can accept or decline this offer.',
+            ephemeral: true
+        });
+    }
+
+    if (action === 'waifu_trade_decline') {
+
+        pendingWaifuTrades.delete(tradeId);
+        await interaction.update({
+            content: 'Trade declined.',
+            embeds: [],
+            components: []
+        });
+        return;
+
+    }
+
+    const fromPlayer = getOrCreateWaifuPlayer(trade.guildId, trade.fromUserId);
+    const toPlayer = getOrCreateWaifuPlayer(trade.guildId, trade.toUserId);
+    const validationError = validateWaifuTradeState(trade, fromPlayer, toPlayer);
+
+    if (validationError) {
+
+        pendingWaifuTrades.delete(tradeId);
+        await interaction.update({
+            content: `Trade failed: ${validationError}`,
+            embeds: [],
+            components: []
+        });
+        return;
+
+    }
+
+    const fromCards = removeWaifuCardsFromPlayer(fromPlayer, trade.from.cardIds);
+    const toCards = removeWaifuCardsFromPlayer(toPlayer, trade.to.cardIds);
+
+    fromPlayer.coins = fromPlayer.coins - trade.from.coins + trade.to.coins;
+    toPlayer.coins = toPlayer.coins - trade.to.coins + trade.from.coins;
+
+    for (const waifu of fromCards) {
+        waifu.ownerId = trade.toUserId;
+        toPlayer.collection.push(waifu);
+    }
+
+    for (const waifu of toCards) {
+        waifu.ownerId = trade.fromUserId;
+        fromPlayer.collection.push(waifu);
+    }
+
+    waifuPlayers.set(getWaifuPlayerKey(fromPlayer.guildId, fromPlayer.userId), fromPlayer);
+    waifuPlayers.set(getWaifuPlayerKey(toPlayer.guildId, toPlayer.userId), toPlayer);
+    saveWaifuPlayers();
+    pendingWaifuTrades.delete(tradeId);
+
+    await interaction.update({
+        content: `Trade completed between <@${trade.fromUserId}> and <@${trade.toUserId}>.`,
+        embeds: [],
+        components: []
+    });
+
+}
+
 async function handleWaifuHelpCommand(message) {
 
     const embed = new EmbedBuilder()
@@ -4818,10 +5338,13 @@ async function handleWaifuHelpCommand(message) {
                 value:
 `\`!daily\` - Claim daily coins.
 \`!coins [@user]\` - Check coins and collection size.
-\`!pull\` - Spend ${WAIFU_PULL_COST} coins for one custom AI waifu.
+\`!pay @user amount\` - Send coins to another user.
+\`!pull\` - Spend ${WAIFU_PULL_COST} coins for one waifu image.
 \`!waifuodds\` - Shows rarity odds.
 \`!waifus [@user] [page]\` - View a collection.
-\`!waifu number-or-id\` - View one waifu image.`,
+\`!waifu number-or-id\` - View one waifu image.
+\`!sellwaifu number-or-id\` - Sell a card for its value.
+\`!trade @user 1 2 100c | 4 50c\` - Trade cards and/or coins.`,
                 inline: false
             },
             {
@@ -4844,11 +5367,12 @@ async function handleWaifuOddsCommand(message) {
     const odds = WAIFU_RARITIES
         .map(rarity => `**${rarity.label}** - ${((rarity.weight / totalWeight) * 100).toFixed(1)}% | ${rarity.value} coin value`)
         .join('\n');
+    const shinyOdds = `\n\n**Shiny Variant** - ${WAIFU_SHINY_CHANCE_PERCENT}% after rarity roll | ${WAIFU_SHINY_VALUE_MULTIPLIER}x value`;
 
     const embed = new EmbedBuilder()
         .setColor('#FF5FA2')
         .setTitle('Waifu Pull Odds')
-        .setDescription(odds)
+        .setDescription(odds + shinyOdds)
         .setFooter({
             text: `Each pull costs ${WAIFU_PULL_COST} fake coins. No real-money value.`
         })
@@ -8529,6 +9053,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         return;
     }
 
+    if (command === '!pay' || command === '!paycoins' || command === '!paymoney') {
+        await handlePayWaifuCoinsCommand(message, args);
+        return;
+    }
+
     if (command === '!pull' || command === '!waifupull') {
         await handleWaifuPullCommand(message);
         return;
@@ -8546,6 +9075,16 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!waifu') {
         await handleWaifuShowCommand(message, args);
+        return;
+    }
+
+    if (command === '!sell' || command === '!sellwaifu' || command === '!sellcard' || command === '!waifusell') {
+        await handleSellWaifuCommand(message, args);
+        return;
+    }
+
+    if (command === '!trade' || command === '!waifutrade') {
+        await handleWaifuTradeCommand(message, args);
         return;
     }
 
@@ -8657,7 +9196,8 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!rank [@user]\` - XP/rank.
 \`!toplevels [page]\` - Shows paged level leaderboard.
 \`!synclevels [max-per-channel]\` - Admin: backfills levels from message history.
-\`!waifuhelp\` / \`!pull\` / \`!waifus\` / \`!waifuodds\` - Waifu collector game.
+\`!waifuhelp\` / \`!pull\` / \`!waifus\` / \`!trade\` - Waifu collector game.
+\`!pay @user amount\` / \`!sellwaifu id\` - Waifu coins and card selling.
 \`!givecoins @user amount\` - Admin: give fake waifu coins.
 \`!staffapply [details]\` / \`!suggest idea\` - Applications and suggestions.
 \`!automod on/off\` / \`!automod block phrase\` - Auto moderation.
@@ -10631,6 +11171,11 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.customId.startsWith('toplevels:')) {
         await handleTopLevelsButton(interaction);
+        return;
+    }
+
+    if (interaction.customId.startsWith('waifu_trade_')) {
+        await handleWaifuTradeButton(interaction);
         return;
     }
 
