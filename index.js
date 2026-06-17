@@ -4465,11 +4465,7 @@ async function callGeminiImageModel(model, prompt) {
                             }
                         ]
                     }
-                ],
-                generationConfig: {
-                    responseModalities: ['TEXT', 'IMAGE'],
-                    temperature: 0.9
-                }
+                ]
             })
         }
     );
