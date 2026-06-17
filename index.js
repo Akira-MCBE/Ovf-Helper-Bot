@@ -96,7 +96,7 @@ const WAIFU_IMAGE_MODELS = (
     process.env.WAIFU_IMAGE_MODELS ||
     process.env.WAIFU_IMAGE_MODEL ||
     process.env.GEMINI_IMAGE_MODEL ||
-    'gemini-2.5-flash-image-preview'
+    'gemini-3.1-flash-image,gemini-3-pro-image,gemini-2.5-flash-image'
 )
     .split(',')
     .map(model => model.trim())
@@ -4448,7 +4448,7 @@ async function callGeminiImageModel(model, prompt) {
     }
 
     const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent`,
         {
             method: 'POST',
             headers: {
@@ -4532,7 +4532,12 @@ async function generateWaifuImage(prompt) {
 
     }
 
-    throw lastError || new Error('No waifu image model configured.');
+    const error = new Error(
+        `No Gemini image model worked. Tried: ${WAIFU_IMAGE_MODELS.join(', ')}. ` +
+        `Set WAIFU_IMAGE_MODEL to a model your API key can use. Last error: ${lastError?.message || 'unknown error'}`
+    );
+    error.cause = lastError;
+    throw error;
 
 }
 
