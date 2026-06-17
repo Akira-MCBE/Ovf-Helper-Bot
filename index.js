@@ -4794,11 +4794,6 @@ function buildWaifuPayload(ownerUser, player, waifu, heading = 'Waifu Pull') {
                 name: 'Variant',
                 value: waifu.shiny ? `Shiny (${WAIFU_SHINY_CHANCE_PERCENT}% chance)` : 'Standard',
                 inline: true
-            },
-            {
-                name: 'Source',
-                value: waifu.sourceImageFileName ? `\`${truncateText(waifu.sourceImageFileName, 80)}\`` : WAIFU_IMAGE_PROVIDER,
-                inline: true
             }
         )
         .setTimestamp(new Date(waifu.createdAt || Date.now()));
