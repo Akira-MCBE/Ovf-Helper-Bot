@@ -96,6 +96,7 @@ const WAIFU_IMAGE_PROVIDER = (process.env.WAIFU_IMAGE_PROVIDER || 'pollinations'
 const POLLINATIONS_IMAGE_MODEL = process.env.POLLINATIONS_IMAGE_MODEL || 'flux';
 const POLLINATIONS_IMAGE_WIDTH = Number.parseInt(process.env.POLLINATIONS_IMAGE_WIDTH || '768', 10) || 768;
 const POLLINATIONS_IMAGE_HEIGHT = Number.parseInt(process.env.POLLINATIONS_IMAGE_HEIGHT || '1024', 10) || 1024;
+const POLLINATIONS_IMAGE_ENHANCE = process.env.POLLINATIONS_IMAGE_ENHANCE === 'true';
 const WAIFU_IMAGE_MODELS = (
     process.env.WAIFU_IMAGE_MODELS ||
     process.env.WAIFU_IMAGE_MODEL ||
@@ -4364,15 +4365,14 @@ function pickWaifuRarity() {
 
 function createWaifuPrompt(waifu) {
 
-    return `Create one original mature anime-style adult waifu character portrait for a Discord collector game.
-Character: ${waifu.name}, ${waifu.title}.
-Rarity mood: ${waifu.rarityLabel}.
-Visual theme: ${waifu.aesthetic}.
-Style: spicy pin-up glamour, flirtatious confidence, sultry expression, dramatic boudoir or nightclub lighting, tasteful fanservice energy.
-Outfit: revealing adult fashion such as a corset, thigh-highs, latex, sheer accents, exposed shoulders, cleavage, cutouts, elegant lingerie-inspired outerwear, or glossy clubwear.
-Pose: confident and suggestive, but still a portrait-focused collector card composition.
-Requirements: clearly adult character, polished anime art, vibrant lighting, no text, no watermark, no logo.
-Safety: no full nudity, no visible genitals, no sex acts, no explicit sexual contact, no childlike features, no school uniform, no existing copyrighted character.`;
+    return [
+        `masterpiece anime trading card portrait of ${waifu.name}, an original adult woman, ${waifu.title}`,
+        `${waifu.rarityLabel} rarity character card, ${waifu.aesthetic}, polished VTuber key visual, sharp clean lineart, detailed eyes, elegant mature proportions`,
+        'spicy pin-up glamour, sultry confident expression, boudoir nightclub lighting, cinematic rim light, glossy high-fashion styling',
+        'very revealing non-nude outfit, micro bikini or sheer lingerie-inspired clubwear, corset, thigh-highs, latex, bodycon cutouts, exposed shoulders, cleavage, strategic coverage',
+        'centered half-body portrait, dynamic pose, premium gacha card art, crisp focus, detailed background, vibrant colors, high detail, no text, no watermark, no logo',
+        'negative prompt: low quality, blurry, messy anatomy, bad hands, extra fingers, missing fingers, extra limbs, deformed face, crossed eyes, distorted body, childlike, school uniform, visible nipples, visible genitals, sex act, explicit sexual contact, nude, naked'
+    ].join(', ');
 
 }
 
@@ -4513,7 +4513,7 @@ async function callPollinationsImageModel(prompt) {
         model: POLLINATIONS_IMAGE_MODEL,
         nologo: 'true',
         private: 'true',
-        enhance: 'true',
+        enhance: String(POLLINATIONS_IMAGE_ENHANCE),
         seed: crypto.randomInt(1, 2147483647).toString()
     });
     const response = await fetch(
