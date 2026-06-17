@@ -110,6 +110,7 @@ const POLLINATIONS_IMAGE_MODEL = process.env.POLLINATIONS_IMAGE_MODEL || 'flux';
 const POLLINATIONS_IMAGE_WIDTH = Number.parseInt(process.env.POLLINATIONS_IMAGE_WIDTH || '768', 10) || 768;
 const POLLINATIONS_IMAGE_HEIGHT = Number.parseInt(process.env.POLLINATIONS_IMAGE_HEIGHT || '1024', 10) || 1024;
 const POLLINATIONS_IMAGE_ENHANCE = process.env.POLLINATIONS_IMAGE_ENHANCE === 'true';
+const ENABLE_SLASH_COMMAND_REGISTRATION = process.env.ENABLE_SLASH_COMMAND_REGISTRATION === 'true';
 const WAIFU_IMAGE_MODELS = (
     process.env.WAIFU_IMAGE_MODELS ||
     process.env.WAIFU_IMAGE_MODEL ||
@@ -353,7 +354,12 @@ client.once('clientReady', async () => {
     scheduleTempRoleRemovals();
     scheduleGiveawayEnds();
     startEventReminderWorker();
-    registerSlashCommandsForGuilds();
+
+    if (ENABLE_SLASH_COMMAND_REGISTRATION) {
+        registerSlashCommandsForGuilds();
+    } else {
+        removeRestrictedSlashCommandsForGuilds();
+    }
 
 });
 
@@ -3901,6 +3907,49 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'warn'
 ];
 
+const RESTRICTED_SLASH_COMMAND_NAMES = new Set([
+    'add',
+    'addrole',
+    'automod',
+    'ban',
+    'case',
+    'cases',
+    'claim',
+    'close',
+    'config',
+    'editcase',
+    'escalate',
+    'givecoins',
+    'kick',
+    'log',
+    'massdelete',
+    'mute',
+    'note',
+    'notes',
+    'onboarding',
+    'purge',
+    'rateticket',
+    'reactionrole',
+    'remove',
+    'removerole',
+    'reopen',
+    'rename',
+    'resetwarns',
+    'staffpanel',
+    'synclevels',
+    'temprole',
+    'ticketconfig',
+    'ticketsetup',
+    'timeout',
+    'transcript',
+    'unclaim',
+    'unmute',
+    'untimeout',
+    'vrcunverify',
+    'vrcverifyconfig',
+    'warn'
+]);
+
 function createGenericSlashCommand(commandName) {
 
     return {
@@ -3915,6 +3964,33 @@ function createGenericSlashCommand(commandName) {
             }
         ]
     };
+
+}
+
+async function removeRestrictedSlashCommandsForGuilds() {
+
+    for (const guild of client.guilds.cache.values()) {
+
+        try {
+
+            const commands = await guild.commands.fetch();
+            const restrictedCommands = commands.filter(command =>
+                RESTRICTED_SLASH_COMMAND_NAMES.has(command.name)
+            );
+
+            for (const command of restrictedCommands.values()) {
+                await guild.commands.delete(command.id);
+            }
+
+            if (restrictedCommands.size > 0) {
+                console.log(`Removed ${restrictedCommands.size} restricted slash command(s) from ${guild.name}.`);
+            }
+
+        } catch (error) {
+            console.error(`Failed to remove restricted slash commands for ${guild.id}:`, error);
+        }
+
+    }
 
 }
 
@@ -4012,9 +4088,12 @@ async function registerSlashCommandsForGuilds() {
         }
     ].concat(
         GENERIC_SLASH_COMMAND_NAMES
-            .filter(commandName => !specialSlashCommandNames.has(commandName))
+            .filter(commandName =>
+                !specialSlashCommandNames.has(commandName) &&
+                !RESTRICTED_SLASH_COMMAND_NAMES.has(commandName)
+            )
             .map(createGenericSlashCommand)
-    );
+    ).filter(command => !RESTRICTED_SLASH_COMMAND_NAMES.has(command.name));
 
     for (const guild of client.guilds.cache.values()) {
         await guild.commands.set(slashCommands).catch(error => {
