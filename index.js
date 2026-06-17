@@ -3810,6 +3810,7 @@ async function syncMemberNicknameToVrc(member, vrcDisplayName) {
 const GENERIC_SLASH_COMMAND_NAMES = [
     '8ball',
     'add',
+    'adminpull',
     'appeal',
     'ask',
     'avatar',
@@ -3831,6 +3832,7 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'fact',
     'giveaway',
     'givecoins',
+    'givewaifu',
     'help',
     'inviteinfo',
     'invites',
@@ -3840,6 +3842,7 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'leave',
     'log',
     'massdelete',
+    'maxpull',
     'mute',
     'myinvites',
     'note',
@@ -4467,6 +4470,13 @@ function pickWaifuRarity() {
 
 }
 
+function getMaxWaifuRarity() {
+    return WAIFU_RARITIES.reduce((bestRarity, rarity) =>
+        rarity.value > bestRarity.value ? rarity : bestRarity,
+        WAIFU_RARITIES[0]
+    );
+}
+
 function rollWaifuShiny() {
     return Math.random() * 100 < WAIFU_SHINY_CHANCE_PERCENT;
 }
@@ -4484,10 +4494,10 @@ function createWaifuPrompt(waifu) {
 
 }
 
-function createWaifuRecord(ownerId) {
+function createWaifuRecord(ownerId, options = {}) {
 
-    const rarity = pickWaifuRarity();
-    const shiny = rollWaifuShiny();
+    const rarity = options.rarity || pickWaifuRarity();
+    const shiny = typeof options.shiny === 'boolean' ? options.shiny : rollWaifuShiny();
     const firstName = getRandomItem(WAIFU_FIRST_NAMES);
     const title = getRandomItem(WAIFU_TITLES);
     const aesthetic = getRandomItem(WAIFU_AESTHETICS);
@@ -4879,6 +4889,52 @@ async function handleWaifuPullCommand(message) {
 
     const payload = buildWaifuPayload(message.author, player, waifu, 'New Waifu');
     payload.content = `${message.author} spent **${WAIFU_PULL_COST} coins** and pulled:`;
+
+    await statusMessage.edit(payload).catch(async () => {
+        await message.channel.send(payload);
+    });
+
+}
+
+async function handleAdminWaifuPullCommand(message, args) {
+
+    if (!hasServerAdminOrOwnerAccess(message.member)) {
+        return message.reply('No permission. Only server admins or the server owner can use admin waifu pulls.');
+    }
+
+    const targetUser = await resolveUserFromArgs(message, args) || message.author;
+
+    if (targetUser.bot) {
+        return message.reply('Choose a real user for the admin pull.');
+    }
+
+    const player = getOrCreateWaifuPlayer(message.guild.id, targetUser.id);
+    const shouldForceShiny = args.some(arg => ['shiny', '--shiny'].includes(String(arg).toLowerCase()));
+    const statusMessage = await message.reply(`Creating a max-rarity waifu for ${targetUser}...`);
+    const waifu = createWaifuRecord(targetUser.id, {
+        rarity: getMaxWaifuRarity(),
+        shiny: shouldForceShiny || rollWaifuShiny()
+    });
+
+    try {
+
+        await assignWaifuImage(waifu);
+
+    } catch (error) {
+
+        console.error('Admin waifu pull failed:', error);
+        await statusMessage.edit(`Admin waifu pull failed. ${truncateText(error.message, 250)}`).catch(() => {});
+        return;
+
+    }
+
+    player.pulls++;
+    player.collection.push(normalizeWaifuRecord(waifu));
+    waifuPlayers.set(getWaifuPlayerKey(player.guildId, player.userId), player);
+    saveWaifuPlayers();
+
+    const payload = buildWaifuPayload(targetUser, player, waifu, 'Admin Max-Rarity Waifu');
+    payload.content = `${message.author} created a max-rarity waifu for ${targetUser}:`;
 
     await statusMessage.edit(payload).catch(async () => {
         await message.channel.send(payload);
@@ -5427,7 +5483,9 @@ async function handleWaifuHelpCommand(message) {
             },
             {
                 name: 'Admin',
-                value: `\`!givecoins @user amount\` - Give fake waifu coins.`,
+                value:
+`\`!givecoins @user amount\` - Give fake waifu coins.
+\`!adminpull [@user] [shiny]\` - Create a max-rarity waifu card.`,
                 inline: false
             }
         )
@@ -9141,6 +9199,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         return;
     }
 
+    if (command === '!adminpull' || command === '!maxpull' || command === '!givewaifu') {
+        await handleAdminWaifuPullCommand(message, args);
+        return;
+    }
+
     if (command === '!waifuodds' || command === '!odds') {
         await handleWaifuOddsCommand(message);
         return;
@@ -9276,7 +9339,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!synclevels [max-per-channel]\` - Admin: backfills levels from message history.
 \`!waifuhelp\` / \`!pull\` / \`!waifus\` / \`!trade\` - Waifu collector game.
 \`!pay @user amount\` / \`!sellwaifu id\` - Waifu coins and card selling.
-\`!givecoins @user amount\` - Admin: give fake waifu coins.
+\`!givecoins @user amount\` / \`!adminpull [@user]\` - Admin waifu tools.
 \`!staffapply [details]\` / \`!suggest idea\` - Applications and suggestions.
 \`!automod on/off\` / \`!automod block phrase\` - Auto moderation.
 \`!onboarding [#channel]\` - Sends the welcome/onboarding message.
