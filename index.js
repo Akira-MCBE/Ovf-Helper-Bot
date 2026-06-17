@@ -79,12 +79,17 @@ const GIVEAWAYS_FILE = path.join(process.cwd(), 'giveaways.json');
 const POLLS_FILE = path.join(process.cwd(), 'polls.json');
 const XP_FILE = path.join(process.cwd(), 'xp.json');
 const SUGGESTIONS_FILE = path.join(process.cwd(), 'suggestions.json');
+const XP_PER_TRACKED_MESSAGE = Math.max(
+    1,
+    Number.parseInt(process.env.XP_PER_TRACKED_MESSAGE || '20', 10) || 20
+);
+const XP_HISTORY_PAGE_SIZE = 100;
+const XP_HISTORY_STATUS_INTERVAL_MS = 10 * 1000;
 const ANTI_RAID_JOIN_WINDOW_MS = 60 * 1000;
 const ANTI_RAID_JOIN_LIMIT = 5;
 const ANTI_RAID_MESSAGE_WINDOW_MS = 10 * 1000;
 const ANTI_RAID_MESSAGE_LIMIT = 6;
 const ANTI_RAID_REPEAT_LIMIT = 3;
-const XP_COOLDOWN_MS = 60 * 1000;
 const EVENT_REMINDER_INTERVAL_MS = 60 * 1000;
 const EVENT_REMINDER_BEFORE_MS = 60 * 60 * 1000;
 
@@ -206,7 +211,6 @@ const giveaways = new Map();
 const polls = new Map();
 const xpRecords = new Map();
 const suggestions = new Map();
-const xpCooldowns = new Map();
 const antiRaidJoinTimestamps = new Map();
 const antiRaidMessageTimestamps = new Map();
 let eventReminderInterval = null;
@@ -3740,6 +3744,7 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'staffpanel',
     'stop',
     'suggest',
+    'synclevels',
     'syncnick',
     'temprole',
     'ticketconfig',
@@ -4751,46 +4756,108 @@ async function handlePollButton(interaction) {
 
 }
 
+function getXpRecordKey(guildId, userId) {
+    return `${guildId}:${userId}`;
+}
+
+function normalizeXpRecord(record = {}) {
+
+    if (!record || typeof record !== 'object') record = {};
+
+    const normalized = {
+        ...record
+    };
+
+    normalized.guildId = String(record.guildId || '');
+    normalized.userId = String(record.userId || '');
+    normalized.xp = Math.max(0, Number.parseInt(record.xp || '0', 10) || 0);
+    normalized.messages = Math.max(0, Number.parseInt(record.messages || '0', 10) || 0);
+
+    return normalized;
+
+}
+
+function syncXpToTrackedMessages(record) {
+
+    record.xp = Math.max(
+        record.xp || 0,
+        (record.messages || 0) * XP_PER_TRACKED_MESSAGE
+    );
+
+    return record;
+
+}
+
 function loadXpRecords() {
 
     xpRecords.clear();
 
-    for (const record of readJsonArrayFile(XP_FILE)) {
-        if (record?.guildId && record?.userId) xpRecords.set(`${record.guildId}:${record.userId}`, record);
+    for (const savedRecord of readJsonArrayFile(XP_FILE)) {
+
+        const record = syncXpToTrackedMessages(normalizeXpRecord(savedRecord));
+
+        if (record.guildId && record.userId) {
+            xpRecords.set(getXpRecordKey(record.guildId, record.userId), record);
+        }
+
     }
 
 }
 
 function saveXpRecords() {
-    writeJsonArrayFile(XP_FILE, [...xpRecords.values()]);
+    writeJsonArrayFile(
+        XP_FILE,
+        [...xpRecords.values()].map(record => syncXpToTrackedMessages(normalizeXpRecord(record)))
+    );
+}
+
+function getOrCreateXpRecord(guildId, userId) {
+
+    const key = getXpRecordKey(guildId, userId);
+    const record = normalizeXpRecord(xpRecords.get(key) || {
+        guildId,
+        userId,
+        xp: 0,
+        messages: 0
+    });
+
+    record.guildId = guildId;
+    record.userId = userId;
+    syncXpToTrackedMessages(record);
+    xpRecords.set(key, record);
+
+    return record;
+
 }
 
 function getXpLevel(xp) {
     return Math.floor(Math.sqrt((xp || 0) / 100));
 }
 
+function getXpRankEntries(guildId) {
+
+    return [...xpRecords.values()]
+        .map(record => syncXpToTrackedMessages(normalizeXpRecord(record)))
+        .filter(record => record.guildId === guildId && ((record.xp || 0) > 0 || (record.messages || 0) > 0))
+        .sort((left, right) =>
+            (right.xp || 0) - (left.xp || 0) ||
+            (right.messages || 0) - (left.messages || 0) ||
+            left.userId.localeCompare(right.userId)
+        );
+
+}
+
 async function addXpForMessage(message) {
 
     if (!message.guild || message.author.bot || message.content.startsWith('!')) return;
 
-    const key = `${message.guild.id}:${message.author.id}`;
-
-    if (Date.now() - (xpCooldowns.get(key) || 0) < XP_COOLDOWN_MS) return;
-
-    xpCooldowns.set(key, Date.now());
-
-    const record = xpRecords.get(key) || {
-        guildId: message.guild.id,
-        userId: message.author.id,
-        xp: 0,
-        messages: 0
-    };
+    const record = getOrCreateXpRecord(message.guild.id, message.author.id);
     const oldLevel = getXpLevel(record.xp);
 
-    record.xp += 15 + Math.floor(Math.random() * 11);
     record.messages++;
+    syncXpToTrackedMessages(record);
     record.updatedAt = new Date().toISOString();
-    xpRecords.set(key, record);
+    xpRecords.set(getXpRecordKey(record.guildId, record.userId), record);
     saveXpRecords();
 
     const newLevel = getXpLevel(record.xp);
@@ -4804,10 +4871,14 @@ async function addXpForMessage(message) {
 async function handleRankCommand(message, args) {
 
     const targetUser = await resolveUserFromArgs(message, args) || message.author;
-    const record = xpRecords.get(`${message.guild.id}:${targetUser.id}`) || {
+    const record = syncXpToTrackedMessages(normalizeXpRecord(xpRecords.get(getXpRecordKey(message.guild.id, targetUser.id)) || {
+        guildId: message.guild.id,
+        userId: targetUser.id,
         xp: 0,
         messages: 0
-    };
+    }));
+    const rankEntries = getXpRankEntries(message.guild.id);
+    const rankIndex = rankEntries.findIndex(entry => entry.userId === targetUser.id);
 
     await message.channel.send({
         embeds: [
@@ -4829,11 +4900,233 @@ async function handleRankCommand(message, args) {
                         name: 'Tracked Messages',
                         value: `${record.messages || 0}`,
                         inline: true
+                    },
+                    {
+                        name: 'Server Rank',
+                        value: rankIndex >= 0 ? `#${rankIndex + 1} of ${rankEntries.length}` : 'Unranked',
+                        inline: true
                     }
                 )
                 .setTimestamp()
         ]
     });
+
+}
+
+function canTrackXpHistoryInChannel(channel, botMember) {
+
+    if (!channel?.isTextBased?.() || !channel.messages?.fetch) return false;
+
+    const permissions = channel.permissionsFor(botMember);
+
+    return permissions?.has([
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.ReadMessageHistory
+    ]);
+
+}
+
+async function addXpHistoryChannel(channel, botMember, channels, seenChannelIds, stats) {
+
+    if (!channel || seenChannelIds.has(channel.id)) return;
+
+    seenChannelIds.add(channel.id);
+
+    if (canTrackXpHistoryInChannel(channel, botMember)) {
+        channels.push(channel);
+        return;
+    }
+
+    if (channel?.isTextBased?.() && channel.messages?.fetch) {
+        stats.channelsSkipped++;
+    }
+
+}
+
+async function collectXpHistoryChannels(guild, botMember, stats) {
+
+    const channels = [];
+    const seenChannelIds = new Set();
+    const guildChannels = await guild.channels.fetch();
+
+    for (const channel of guildChannels.values()) {
+
+        await addXpHistoryChannel(channel, botMember, channels, seenChannelIds, stats);
+
+        if (!channel?.threads?.fetchActive) continue;
+
+        const activeThreads = await channel.threads.fetchActive().catch(() => null);
+
+        if (!activeThreads?.threads) continue;
+
+        for (const thread of activeThreads.threads.values()) {
+            await addXpHistoryChannel(thread, botMember, channels, seenChannelIds, stats);
+        }
+
+    }
+
+    return channels;
+
+}
+
+function addHistoryMessageToXpCounts(fetchedMessage, guildId, userMessageCounts) {
+
+    if (!fetchedMessage.author?.id || fetchedMessage.author.bot || fetchedMessage.webhookId) return false;
+    if (fetchedMessage.guild?.id && fetchedMessage.guild.id !== guildId) return false;
+    if (String(fetchedMessage.content || '').startsWith('!')) return false;
+
+    const userId = fetchedMessage.author.id;
+    userMessageCounts.set(userId, (userMessageCounts.get(userId) || 0) + 1);
+
+    return true;
+
+}
+
+function formatXpHistorySyncStatus(stats, isFinished = false) {
+
+    const status = isFinished ? 'Finished' : 'Working';
+
+    return `${status} level history sync.\n` +
+        `Channels scanned: **${stats.channelsScanned}/${stats.totalChannels}**\n` +
+        `Messages checked: **${stats.messagesChecked}**\n` +
+        `Member messages counted: **${stats.memberMessages}**\n` +
+        `Users found: **${stats.usersFound}**\n` +
+        `Users updated: **${stats.usersUpdated}**\n` +
+        `Skipped channels: **${stats.channelsSkipped}**\n` +
+        `Channel errors: **${stats.channelErrors}**`;
+
+}
+
+async function handleSyncLevelsCommand(message, args) {
+
+    if (!hasServerAdminOrOwnerAccess(message.member)) {
+        return message.reply('No permission. Only server admins or the server owner can sync level history.');
+    }
+
+    const parsedLimit = Number.parseInt(args[0] || '', 10);
+    const perChannelLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
+    const botMember = message.guild.members.me ||
+        await message.guild.members.fetchMe().catch(() => null);
+
+    if (!botMember) {
+        return message.reply('I could not check my server permissions.');
+    }
+
+    const stats = {
+        totalChannels: 0,
+        channelsScanned: 0,
+        channelsSkipped: 0,
+        channelErrors: 0,
+        messagesChecked: 0,
+        memberMessages: 0,
+        usersFound: 0,
+        usersUpdated: 0
+    };
+    const userMessageCounts = new Map();
+    const statusMessage = await message.reply(
+        `Starting level history sync${perChannelLimit ? `, up to ${perChannelLimit} messages per channel` : ''}.`
+    );
+
+    try {
+
+        const channels = await collectXpHistoryChannels(message.guild, botMember, stats);
+        stats.totalChannels = channels.length;
+
+        if (!channels.length) {
+            await statusMessage.edit('I could not access any text channels with View Channel and Read Message History.');
+            return;
+        }
+
+        let lastStatusUpdate = Date.now();
+
+        for (const channel of channels) {
+
+            stats.channelsScanned++;
+
+            try {
+
+                let before;
+                let channelMessagesChecked = 0;
+
+                while (true) {
+
+                    const remainingForChannel = perChannelLimit
+                        ? perChannelLimit - channelMessagesChecked
+                        : XP_HISTORY_PAGE_SIZE;
+
+                    if (remainingForChannel <= 0) break;
+
+                    const fetchLimit = Math.min(XP_HISTORY_PAGE_SIZE, remainingForChannel);
+                    const fetchedMessages = await channel.messages.fetch({
+                        limit: fetchLimit,
+                        before
+                    });
+
+                    if (!fetchedMessages.size) break;
+
+                    before = fetchedMessages.last()?.id;
+                    channelMessagesChecked += fetchedMessages.size;
+                    stats.messagesChecked += fetchedMessages.size;
+
+                    for (const fetchedMessage of fetchedMessages.values()) {
+                        if (addHistoryMessageToXpCounts(fetchedMessage, message.guild.id, userMessageCounts)) {
+                            stats.memberMessages++;
+                        }
+                    }
+
+                    stats.usersFound = userMessageCounts.size;
+
+                    if (Date.now() - lastStatusUpdate >= XP_HISTORY_STATUS_INTERVAL_MS) {
+
+                        lastStatusUpdate = Date.now();
+                        await statusMessage.edit(formatXpHistorySyncStatus(stats)).catch(() => {});
+
+                    }
+
+                    if (fetchedMessages.size < fetchLimit || !before) break;
+
+                }
+
+            } catch (error) {
+
+                stats.channelErrors++;
+                console.error(`Level history sync failed in ${channel.id}:`, error);
+
+            }
+
+        }
+
+        const syncedAt = new Date().toISOString();
+
+        for (const [userId, messageCount] of userMessageCounts.entries()) {
+
+            const record = getOrCreateXpRecord(message.guild.id, userId);
+            const oldMessages = record.messages || 0;
+            const oldXp = record.xp || 0;
+
+            record.messages = Math.max(oldMessages, messageCount);
+            syncXpToTrackedMessages(record);
+            record.historySyncedAt = syncedAt;
+            record.updatedAt = syncedAt;
+            xpRecords.set(getXpRecordKey(record.guildId, record.userId), record);
+
+            if (record.messages !== oldMessages || record.xp !== oldXp) {
+                stats.usersUpdated++;
+            }
+
+        }
+
+        saveXpRecords();
+        stats.usersFound = userMessageCounts.size;
+
+        await statusMessage.edit(formatXpHistorySyncStatus(stats, true)).catch(() => {});
+
+    } catch (error) {
+
+        console.error('Level history sync failed:', error);
+        await statusMessage.edit('Level history sync failed. Check the console for details.').catch(() => {});
+
+    }
 
 }
 
@@ -4991,10 +5284,12 @@ async function handleProfileCommand(message, args) {
     const noteCount = (staffNotes.get(`${message.guild.id}:${targetUser.id}`) || []).length;
     const caseCount = getGuildCaseStore(message.guild.id).cases.filter(caseRecord => caseRecord.targetUserId === targetUser.id).length;
     const vrcRecord = vrcVerificationRecords.get(getVrcVerifyKey(message.guild.id, targetUser.id));
-    const xpRecord = xpRecords.get(`${message.guild.id}:${targetUser.id}`) || {
+    const xpRecord = syncXpToTrackedMessages(normalizeXpRecord(xpRecords.get(getXpRecordKey(message.guild.id, targetUser.id)) || {
+        guildId: message.guild.id,
+        userId: targetUser.id,
         xp: 0,
         messages: 0
-    };
+    }));
     const ticketCount = getGuildCaseStore(message.guild.id).cases.filter(caseRecord =>
         caseRecord.targetUserId === targetUser.id &&
         String(caseRecord.type || '').includes('TICKET')
@@ -5021,7 +5316,7 @@ async function handleProfileCommand(message, args) {
                     },
                     {
                         name: 'Activity',
-                        value: `Level ${getXpLevel(xpRecord.xp)} (${xpRecord.xp || 0} XP)\nInvites: ${inviteStats.get(targetUser.id) || 0}`,
+                        value: `Level ${getXpLevel(xpRecord.xp)} (${xpRecord.xp || 0} XP)\nMessages: ${xpRecord.messages || 0}\nInvites: ${inviteStats.get(targetUser.id) || 0}`,
                         inline: true
                     },
                     {
@@ -7418,6 +7713,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         return;
     }
 
+    if (command === '!synclevels' || command === '!levelsync' || command === '!backfilllevels') {
+        await handleSyncLevelsCommand(message, args);
+        return;
+    }
+
     if (command === '!staffapply') {
         await handleStaffApplyCommand(message, args);
         return;
@@ -7504,6 +7804,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!giveaway create prize | 1d | winners\` - Giveaways.
 \`!poll question | option 1 | option 2\` - Button polls.
 \`!rank [@user]\` - XP/rank.
+\`!synclevels [max-per-channel]\` - Admin: backfills levels from message history.
 \`!staffapply [details]\` / \`!suggest idea\` - Applications and suggestions.
 \`!automod on/off\` / \`!automod block phrase\` - Auto moderation.
 \`!onboarding [#channel]\` - Sends the welcome/onboarding message.
