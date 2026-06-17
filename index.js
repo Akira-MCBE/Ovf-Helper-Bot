@@ -92,6 +92,10 @@ const WAIFU_DAILY_AMOUNT = 500;
 const WAIFU_DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const WAIFU_PULL_COST = 100;
 const WAIFU_COLLECTION_PAGE_SIZE = 10;
+const WAIFU_IMAGE_PROVIDER = (process.env.WAIFU_IMAGE_PROVIDER || 'pollinations').toLowerCase();
+const POLLINATIONS_IMAGE_MODEL = process.env.POLLINATIONS_IMAGE_MODEL || 'flux';
+const POLLINATIONS_IMAGE_WIDTH = Number.parseInt(process.env.POLLINATIONS_IMAGE_WIDTH || '768', 10) || 768;
+const POLLINATIONS_IMAGE_HEIGHT = Number.parseInt(process.env.POLLINATIONS_IMAGE_HEIGHT || '1024', 10) || 1024;
 const WAIFU_IMAGE_MODELS = (
     process.env.WAIFU_IMAGE_MODELS ||
     process.env.WAIFU_IMAGE_MODEL ||
@@ -4501,7 +4505,48 @@ async function callGeminiImageModel(model, prompt) {
 
 }
 
-async function generateWaifuImage(prompt) {
+async function callPollinationsImageModel(prompt) {
+
+    const query = new URLSearchParams({
+        width: String(POLLINATIONS_IMAGE_WIDTH),
+        height: String(POLLINATIONS_IMAGE_HEIGHT),
+        model: POLLINATIONS_IMAGE_MODEL,
+        nologo: 'true',
+        private: 'true',
+        enhance: 'true',
+        seed: crypto.randomInt(1, 2147483647).toString()
+    });
+    const response = await fetch(
+        `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${query.toString()}`,
+        {
+            headers: {
+                Accept: 'image/png,image/jpeg,image/webp,*/*'
+            }
+        }
+    );
+
+    if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(`Pollinations image API error ${response.status}: ${truncateText(errorText || response.statusText, 300)}`);
+    }
+
+    const mimeType = (response.headers.get('content-type') || 'image/png').split(';')[0];
+
+    if (!mimeType.startsWith('image/')) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(`Pollinations returned ${mimeType || 'non-image'} instead of an image: ${truncateText(errorText, 300)}`);
+    }
+
+    const imageBuffer = Buffer.from(await response.arrayBuffer());
+
+    return {
+        data: imageBuffer.toString('base64'),
+        mimeType
+    };
+
+}
+
+async function generateGeminiWaifuImage(prompt) {
 
     let lastError = null;
 
@@ -4534,6 +4579,20 @@ async function generateWaifuImage(prompt) {
     );
     error.cause = lastError;
     throw error;
+
+}
+
+async function generateWaifuImage(prompt) {
+
+    if (WAIFU_IMAGE_PROVIDER === 'gemini') {
+        return generateGeminiWaifuImage(prompt);
+    }
+
+    if (WAIFU_IMAGE_PROVIDER === 'pollinations') {
+        return callPollinationsImageModel(prompt);
+    }
+
+    throw new Error(`Unknown WAIFU_IMAGE_PROVIDER "${WAIFU_IMAGE_PROVIDER}". Use "pollinations" or "gemini".`);
 
 }
 
@@ -4752,7 +4811,7 @@ async function handleWaifuHelpCommand(message) {
     const embed = new EmbedBuilder()
         .setColor('#FF5FA2')
         .setTitle('Waifu Collector Commands')
-        .setDescription('A SFW fake-coin collector game. Coins and waifus have no real-money value.')
+        .setDescription(`A fake-coin collector game using **${WAIFU_IMAGE_PROVIDER}** images. Coins and waifus have no real-money value.`)
         .addFields(
             {
                 name: 'Player',
