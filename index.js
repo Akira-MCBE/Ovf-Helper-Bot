@@ -79,6 +79,8 @@ const GIVEAWAYS_FILE = path.join(process.cwd(), 'giveaways.json');
 const POLLS_FILE = path.join(process.cwd(), 'polls.json');
 const XP_FILE = path.join(process.cwd(), 'xp.json');
 const SUGGESTIONS_FILE = path.join(process.cwd(), 'suggestions.json');
+const WAIFU_GAME_FILE = path.join(process.cwd(), 'waifu-game.json');
+const WAIFU_IMAGE_DIR = path.join(process.cwd(), 'waifu-images');
 const XP_PER_TRACKED_MESSAGE = Math.max(
     1,
     Number.parseInt(process.env.XP_PER_TRACKED_MESSAGE || '20', 10) || 20
@@ -86,6 +88,19 @@ const XP_PER_TRACKED_MESSAGE = Math.max(
 const XP_HISTORY_PAGE_SIZE = 100;
 const XP_HISTORY_STATUS_INTERVAL_MS = 10 * 1000;
 const TOP_LEVELS_PAGE_SIZE = 10;
+const WAIFU_DAILY_AMOUNT = 500;
+const WAIFU_DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const WAIFU_PULL_COST = 100;
+const WAIFU_COLLECTION_PAGE_SIZE = 10;
+const WAIFU_IMAGE_MODELS = (
+    process.env.WAIFU_IMAGE_MODELS ||
+    process.env.WAIFU_IMAGE_MODEL ||
+    process.env.GEMINI_IMAGE_MODEL ||
+    'gemini-2.5-flash-image-preview'
+)
+    .split(',')
+    .map(model => model.trim())
+    .filter(Boolean);
 const ANTI_RAID_JOIN_WINDOW_MS = 60 * 1000;
 const ANTI_RAID_JOIN_LIMIT = 5;
 const ANTI_RAID_MESSAGE_WINDOW_MS = 10 * 1000;
@@ -212,6 +227,7 @@ const giveaways = new Map();
 const polls = new Map();
 const xpRecords = new Map();
 const suggestions = new Map();
+const waifuPlayers = new Map();
 const antiRaidJoinTimestamps = new Map();
 const antiRaidMessageTimestamps = new Map();
 let eventReminderInterval = null;
@@ -278,6 +294,7 @@ client.once('clientReady', async () => {
     loadPolls();
     loadXpRecords();
     loadSuggestions();
+    loadWaifuPlayers();
 
     client.user.setPresence({
     activities: [
@@ -378,6 +395,90 @@ const FUN_FACTS = [
 function getRandomItem(array) {
     return array[Math.floor(Math.random() * array.length)];
 }
+
+const WAIFU_RARITIES = [
+    {
+        id: 'common',
+        label: 'Common',
+        weight: 55,
+        color: '#95A5A6',
+        value: 25
+    },
+    {
+        id: 'rare',
+        label: 'Rare',
+        weight: 28,
+        color: '#3498DB',
+        value: 75
+    },
+    {
+        id: 'epic',
+        label: 'Epic',
+        weight: 12,
+        color: '#9B59B6',
+        value: 200
+    },
+    {
+        id: 'legendary',
+        label: 'Legendary',
+        weight: 4,
+        color: '#F1C40F',
+        value: 600
+    },
+    {
+        id: 'mythic',
+        label: 'Mythic',
+        weight: 1,
+        color: '#FF5FA2',
+        value: 1500
+    }
+];
+
+const WAIFU_FIRST_NAMES = [
+    'Airi',
+    'Mika',
+    'Rin',
+    'Sora',
+    'Yuna',
+    'Nami',
+    'Kira',
+    'Aya',
+    'Luna',
+    'Emi',
+    'Nova',
+    'Mira',
+    'Reina',
+    'Akari',
+    'Selene'
+];
+
+const WAIFU_TITLES = [
+    'Starlit DJ',
+    'Cyber Shrine Keeper',
+    'Moonlit Duelist',
+    'Arcade Idol',
+    'Velvet Mage',
+    'Neon Florist',
+    'Crystal Mechanic',
+    'Dream Librarian',
+    'Astral Dancer',
+    'Prism Guardian',
+    'Retro Streamer',
+    'Skyline Witch'
+];
+
+const WAIFU_AESTHETICS = [
+    'neon city lights',
+    'soft pastel arcade',
+    'VRChat club fashion',
+    'celestial streetwear',
+    'glowing crystal accessories',
+    'retro-futuristic headphones',
+    'holographic jacket',
+    'moon garden background',
+    'starry cyberpunk skyline',
+    'cozy gaming room'
+];
 
 function simplePercentFromText(text) {
 
@@ -3694,14 +3795,17 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'claim',
     'close',
     'coinflip',
+    'coins',
     'compliment',
     'config',
+    'daily',
     'automod',
     'editcase',
     'escalate',
     'event',
     'fact',
     'giveaway',
+    'givecoins',
     'help',
     'inviteinfo',
     'invites',
@@ -3717,12 +3821,14 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'notes',
     'nowplaying',
     'onboarding',
+    'odds',
     'pause',
     'ping',
     'play',
     'poll',
     'profile',
     'purge',
+    'pull',
     'queue',
     'rate',
     'rateticket',
@@ -3758,6 +3864,12 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'untimeout',
     'userinfo',
     'volume',
+    'waifu',
+    'waifudaily',
+    'waifuhelp',
+    'waifuodds',
+    'waifupull',
+    'waifus',
     'vrchat',
     'vrclinked',
     'vrcunverify',
@@ -4139,6 +4251,552 @@ function writeJsonArrayFile(filePath, values) {
     } catch (error) {
         console.error(`Failed to write ${filePath}:`, error);
     }
+
+}
+
+function getWaifuPlayerKey(guildId, userId) {
+    return `${guildId}:${userId}`;
+}
+
+function normalizeWaifuRecord(record = {}) {
+
+    if (!record || typeof record !== 'object' || !record.id) return null;
+
+    return {
+        id: String(record.id),
+        ownerId: String(record.ownerId || ''),
+        name: String(record.name || 'Unknown Waifu'),
+        title: String(record.title || 'Mystery Muse'),
+        rarity: String(record.rarity || 'common'),
+        rarityLabel: String(record.rarityLabel || 'Common'),
+        color: String(record.color || '#95A5A6'),
+        value: Math.max(0, Number.parseInt(record.value || '0', 10) || 0),
+        prompt: String(record.prompt || ''),
+        imageFileName: record.imageFileName ? String(record.imageFileName) : null,
+        createdAt: record.createdAt || new Date().toISOString()
+    };
+
+}
+
+function normalizeWaifuPlayer(record = {}) {
+
+    if (!record || typeof record !== 'object') record = {};
+
+    return {
+        guildId: String(record.guildId || ''),
+        userId: String(record.userId || ''),
+        coins: Math.max(0, Number.parseInt(record.coins || '0', 10) || 0),
+        pulls: Math.max(0, Number.parseInt(record.pulls || '0', 10) || 0),
+        lastDailyAt: record.lastDailyAt || null,
+        collection: Array.isArray(record.collection)
+            ? record.collection.map(normalizeWaifuRecord).filter(Boolean)
+            : []
+    };
+
+}
+
+function loadWaifuPlayers() {
+
+    waifuPlayers.clear();
+
+    for (const savedRecord of readJsonArrayFile(WAIFU_GAME_FILE)) {
+
+        const record = normalizeWaifuPlayer(savedRecord);
+
+        if (record.guildId && record.userId) {
+            waifuPlayers.set(getWaifuPlayerKey(record.guildId, record.userId), record);
+        }
+
+    }
+
+}
+
+function saveWaifuPlayers() {
+    writeJsonArrayFile(WAIFU_GAME_FILE, [...waifuPlayers.values()].map(normalizeWaifuPlayer));
+}
+
+function getWaifuPlayer(guildId, userId) {
+
+    return normalizeWaifuPlayer(waifuPlayers.get(getWaifuPlayerKey(guildId, userId)) || {
+        guildId,
+        userId,
+        coins: 0,
+        pulls: 0,
+        lastDailyAt: null,
+        collection: []
+    });
+
+}
+
+function getOrCreateWaifuPlayer(guildId, userId) {
+
+    const key = getWaifuPlayerKey(guildId, userId);
+    const record = getWaifuPlayer(guildId, userId);
+
+    record.guildId = guildId;
+    record.userId = userId;
+    waifuPlayers.set(key, record);
+
+    return record;
+
+}
+
+function pickWaifuRarity() {
+
+    const totalWeight = WAIFU_RARITIES.reduce((sum, rarity) => sum + rarity.weight, 0);
+    let roll = Math.random() * totalWeight;
+
+    for (const rarity of WAIFU_RARITIES) {
+
+        roll -= rarity.weight;
+
+        if (roll <= 0) return rarity;
+
+    }
+
+    return WAIFU_RARITIES[0];
+
+}
+
+function createWaifuPrompt(waifu) {
+
+    return `Create one original mature anime-style adult waifu character portrait for a Discord collector game.
+Character: ${waifu.name}, ${waifu.title}.
+Rarity mood: ${waifu.rarityLabel}.
+Visual theme: ${waifu.aesthetic}.
+Style: spicy pin-up glamour, flirtatious confidence, sultry expression, dramatic boudoir or nightclub lighting, tasteful fanservice energy.
+Outfit: revealing adult fashion such as a corset, thigh-highs, latex, sheer accents, exposed shoulders, cleavage, cutouts, elegant lingerie-inspired outerwear, or glossy clubwear.
+Pose: confident and suggestive, but still a portrait-focused collector card composition.
+Requirements: clearly adult character, polished anime art, vibrant lighting, no text, no watermark, no logo.
+Safety: no full nudity, no visible genitals, no sex acts, no explicit sexual contact, no childlike features, no school uniform, no existing copyrighted character.`;
+
+}
+
+function createWaifuRecord(ownerId) {
+
+    const rarity = pickWaifuRarity();
+    const firstName = getRandomItem(WAIFU_FIRST_NAMES);
+    const title = getRandomItem(WAIFU_TITLES);
+    const aesthetic = getRandomItem(WAIFU_AESTHETICS);
+    const waifu = {
+        id: crypto.randomBytes(5).toString('hex'),
+        ownerId,
+        name: `${firstName} ${crypto.randomBytes(2).toString('hex').toUpperCase()}`,
+        title,
+        aesthetic,
+        rarity: rarity.id,
+        rarityLabel: rarity.label,
+        color: rarity.color,
+        value: rarity.value,
+        prompt: '',
+        imageFileName: null,
+        createdAt: new Date().toISOString()
+    };
+
+    waifu.prompt = createWaifuPrompt(waifu);
+
+    return waifu;
+
+}
+
+function getWaifuImageExtension(mimeType) {
+
+    if (mimeType === 'image/jpeg') return 'jpg';
+    if (mimeType === 'image/webp') return 'webp';
+    return 'png';
+
+}
+
+function saveWaifuImage(waifu, imageData) {
+
+    if (!imageData?.data) return null;
+
+    fs.mkdirSync(WAIFU_IMAGE_DIR, {
+        recursive: true
+    });
+
+    const extension = getWaifuImageExtension(imageData.mimeType);
+    const fileName = `${waifu.id}.${extension}`;
+    const filePath = path.join(WAIFU_IMAGE_DIR, fileName);
+
+    fs.writeFileSync(filePath, Buffer.from(imageData.data, 'base64'));
+    waifu.imageFileName = fileName;
+
+    return filePath;
+
+}
+
+function getWaifuImageAttachment(waifu) {
+
+    if (!waifu.imageFileName) return null;
+
+    const fileName = path.basename(waifu.imageFileName);
+    const filePath = path.join(WAIFU_IMAGE_DIR, fileName);
+
+    if (!fs.existsSync(filePath)) return null;
+
+    return new AttachmentBuilder(filePath, {
+        name: fileName
+    });
+
+}
+
+async function callGeminiImageModel(model, prompt) {
+
+    if (!GEMINI_API_KEY) {
+        throw new Error('Missing GEMINI_API_KEY environment variable.');
+    }
+
+    const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': GEMINI_API_KEY
+            },
+            body: JSON.stringify({
+                contents: [
+                    {
+                        role: 'user',
+                        parts: [
+                            {
+                                text: prompt
+                            }
+                        ]
+                    }
+                ],
+                generationConfig: {
+                    responseModalities: ['TEXT', 'IMAGE'],
+                    temperature: 0.9
+                }
+            })
+        }
+    );
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+        const errorMessage = data?.error?.message || `Gemini image API error ${response.status}`;
+        const error = new Error(errorMessage);
+        error.status = response.status;
+        error.model = model;
+        throw error;
+    }
+
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+
+    for (const part of parts) {
+
+        const inlineData = part.inlineData || part.inline_data;
+
+        if (inlineData?.data) {
+            return {
+                data: inlineData.data,
+                mimeType: inlineData.mimeType || inlineData.mime_type || 'image/png'
+            };
+        }
+
+    }
+
+    const error = new Error('Gemini returned no image data. Set WAIFU_IMAGE_MODEL to an image-capable Gemini model.');
+    error.model = model;
+    throw error;
+
+}
+
+async function generateWaifuImage(prompt) {
+
+    let lastError = null;
+
+    for (const model of WAIFU_IMAGE_MODELS) {
+
+        for (let attempt = 1; attempt <= 2; attempt++) {
+
+            try {
+                return await callGeminiImageModel(model, prompt);
+            } catch (error) {
+
+                lastError = error;
+
+                const temporary = isTemporaryGeminiError(error.status, error.message);
+
+                if (!temporary) break;
+
+                console.warn(`Waifu image model ${model} failed temporarily on attempt ${attempt}: ${error.message}`);
+                await wait(1000 * attempt);
+
+            }
+
+        }
+
+    }
+
+    throw lastError || new Error('No waifu image model configured.');
+
+}
+
+function buildWaifuPayload(ownerUser, player, waifu, heading = 'Waifu Pull') {
+
+    const attachment = getWaifuImageAttachment(waifu);
+    const embed = new EmbedBuilder()
+        .setColor(waifu.color || '#FF5FA2')
+        .setTitle(`${heading}: ${waifu.name}`)
+        .setDescription(`**${waifu.rarityLabel}** ${waifu.title}`)
+        .addFields(
+            {
+                name: 'Owner',
+                value: `${ownerUser}`,
+                inline: true
+            },
+            {
+                name: 'Value',
+                value: `${waifu.value} coins`,
+                inline: true
+            },
+            {
+                name: 'ID',
+                value: `\`${waifu.id}\``,
+                inline: true
+            },
+            {
+                name: 'Balance',
+                value: `${player.coins} coins`,
+                inline: true
+            }
+        )
+        .setTimestamp(new Date(waifu.createdAt || Date.now()));
+
+    if (attachment && waifu.imageFileName) {
+        embed.setImage(`attachment://${path.basename(waifu.imageFileName)}`);
+    } else {
+        embed.addFields({
+            name: 'Image',
+            value: 'Image file not found.',
+            inline: false
+        });
+    }
+
+    return {
+        embeds: [embed],
+        files: attachment ? [attachment] : []
+    };
+
+}
+
+async function handleWaifuDailyCommand(message) {
+
+    const player = getOrCreateWaifuPlayer(message.guild.id, message.author.id);
+    const now = Date.now();
+    const lastDailyAt = Date.parse(player.lastDailyAt || '') || 0;
+    const nextDailyAt = lastDailyAt + WAIFU_DAILY_COOLDOWN_MS;
+
+    if (lastDailyAt && now < nextDailyAt) {
+        return message.reply(`You already claimed your daily coins. Come back <t:${Math.floor(nextDailyAt / 1000)}:R>.`);
+    }
+
+    player.coins += WAIFU_DAILY_AMOUNT;
+    player.lastDailyAt = new Date(now).toISOString();
+    waifuPlayers.set(getWaifuPlayerKey(player.guildId, player.userId), player);
+    saveWaifuPlayers();
+
+    await message.reply(`You claimed **${WAIFU_DAILY_AMOUNT} coins**. Balance: **${player.coins} coins**.`);
+
+}
+
+async function handleWaifuBalanceCommand(message, args) {
+
+    const targetUser = await resolveUserFromArgs(message, args) || message.author;
+    const player = getWaifuPlayer(message.guild.id, targetUser.id);
+
+    await message.reply(`${targetUser} has **${player.coins} coins** and **${player.collection.length} waifu(s)**.`);
+
+}
+
+async function handleWaifuPullCommand(message) {
+
+    const player = getOrCreateWaifuPlayer(message.guild.id, message.author.id);
+
+    if (player.coins < WAIFU_PULL_COST) {
+        return message.reply(`You need **${WAIFU_PULL_COST} coins** to pull. Your balance is **${player.coins} coins**. Use \`!daily\` to claim coins.`);
+    }
+
+    const statusMessage = await message.reply('Summoning a custom AI waifu...');
+    const waifu = createWaifuRecord(message.author.id);
+
+    try {
+
+        const imageData = await generateWaifuImage(waifu.prompt);
+        saveWaifuImage(waifu, imageData);
+
+    } catch (error) {
+
+        console.error('Waifu image generation failed:', error);
+        await statusMessage.edit(`Image generation failed, so no coins were spent. ${truncateText(error.message, 250)}`).catch(() => {});
+        return;
+
+    }
+
+    player.coins -= WAIFU_PULL_COST;
+    player.pulls++;
+    player.collection.push(normalizeWaifuRecord(waifu));
+    waifuPlayers.set(getWaifuPlayerKey(player.guildId, player.userId), player);
+    saveWaifuPlayers();
+
+    const payload = buildWaifuPayload(message.author, player, waifu, 'New Waifu');
+    payload.content = `${message.author} spent **${WAIFU_PULL_COST} coins** and pulled:`;
+
+    await statusMessage.edit(payload).catch(async () => {
+        await message.channel.send(payload);
+    });
+
+}
+
+async function handleWaifuCollectionCommand(message, args) {
+
+    const targetUser = await resolveUserFromArgs(message, args) || message.author;
+    const pageArg = args.find(arg => /^\d+$/.test(arg) && arg !== targetUser.id);
+    const requestedPage = Number.parseInt(pageArg || '1', 10);
+    const player = getWaifuPlayer(message.guild.id, targetUser.id);
+    const totalPages = Math.max(1, Math.ceil(player.collection.length / WAIFU_COLLECTION_PAGE_SIZE));
+    const page = Math.min(Math.max((requestedPage || 1) - 1, 0), totalPages - 1);
+    const startIndex = page * WAIFU_COLLECTION_PAGE_SIZE;
+    const waifus = player.collection.slice(startIndex, startIndex + WAIFU_COLLECTION_PAGE_SIZE);
+    const description = waifus.length
+        ? waifus.map((waifu, index) =>
+            `#${startIndex + index + 1} - **${waifu.name}** | ${waifu.rarityLabel} | ${waifu.value} coins | \`${waifu.id}\``
+        ).join('\n')
+        : 'No waifus yet. Use `!daily`, then `!pull`.';
+
+    const embed = new EmbedBuilder()
+        .setColor('#FF5FA2')
+        .setTitle(`${targetUser.username}'s Waifu Collection`)
+        .setDescription(description)
+        .addFields(
+            {
+                name: 'Coins',
+                value: `${player.coins}`,
+                inline: true
+            },
+            {
+                name: 'Total Waifus',
+                value: `${player.collection.length}`,
+                inline: true
+            }
+        )
+        .setFooter({
+            text: `Page ${page + 1} of ${totalPages}`
+        })
+        .setTimestamp();
+
+    await message.channel.send({
+        embeds: [embed]
+    });
+
+}
+
+async function handleWaifuShowCommand(message, args) {
+
+    const player = getWaifuPlayer(message.guild.id, message.author.id);
+    const lookup = args[0];
+
+    if (!lookup) {
+        return message.reply('Usage: `!waifu number-or-id`');
+    }
+
+    const index = Number.parseInt(lookup, 10);
+    const waifu = Number.isFinite(index) && index > 0
+        ? player.collection[index - 1]
+        : player.collection.find(record => record.id.toLowerCase().startsWith(String(lookup).toLowerCase()));
+
+    if (!waifu) {
+        return message.reply('I could not find that waifu in your collection.');
+    }
+
+    await message.channel.send(buildWaifuPayload(message.author, player, waifu, 'Waifu'));
+
+}
+
+async function handleGiveCoinsCommand(message, args) {
+
+    if (!hasServerAdminOrOwnerAccess(message.member)) {
+        return message.reply('No permission. Only server admins or the server owner can give waifu coins.');
+    }
+
+    const targetUser = await resolveUserFromArgs(message, args);
+
+    if (!targetUser) {
+        return message.reply('Usage: `!givecoins @user amount`');
+    }
+
+    const targetArgIndex = args.findIndex(arg => getUserIdFromArg(arg) === targetUser.id);
+    const amountArg = args.slice(Math.max(targetArgIndex + 1, 0)).find(arg => /^\d+$/.test(arg));
+    const amount = Number.parseInt(amountArg || '', 10);
+
+    if (!Number.isFinite(amount) || amount < 1) {
+        return message.reply('Choose a coin amount greater than 0. Example: `!givecoins @user 1000`');
+    }
+
+    const player = getOrCreateWaifuPlayer(message.guild.id, targetUser.id);
+    player.coins += amount;
+    waifuPlayers.set(getWaifuPlayerKey(player.guildId, player.userId), player);
+    saveWaifuPlayers();
+
+    await message.reply(`Gave **${amount} coins** to ${targetUser}. New balance: **${player.coins} coins**.`);
+
+}
+
+async function handleWaifuHelpCommand(message) {
+
+    const embed = new EmbedBuilder()
+        .setColor('#FF5FA2')
+        .setTitle('Waifu Collector Commands')
+        .setDescription('A SFW fake-coin collector game. Coins and waifus have no real-money value.')
+        .addFields(
+            {
+                name: 'Player',
+                value:
+`\`!daily\` - Claim daily coins.
+\`!coins [@user]\` - Check coins and collection size.
+\`!pull\` - Spend ${WAIFU_PULL_COST} coins for one custom AI waifu.
+\`!waifuodds\` - Shows rarity odds.
+\`!waifus [@user] [page]\` - View a collection.
+\`!waifu number-or-id\` - View one waifu image.`,
+                inline: false
+            },
+            {
+                name: 'Admin',
+                value: `\`!givecoins @user amount\` - Give fake waifu coins.`,
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+    await message.channel.send({
+        embeds: [embed]
+    });
+
+}
+
+async function handleWaifuOddsCommand(message) {
+
+    const totalWeight = WAIFU_RARITIES.reduce((sum, rarity) => sum + rarity.weight, 0);
+    const odds = WAIFU_RARITIES
+        .map(rarity => `**${rarity.label}** - ${((rarity.weight / totalWeight) * 100).toFixed(1)}% | ${rarity.value} coin value`)
+        .join('\n');
+
+    const embed = new EmbedBuilder()
+        .setColor('#FF5FA2')
+        .setTitle('Waifu Pull Odds')
+        .setDescription(odds)
+        .setFooter({
+            text: `Each pull costs ${WAIFU_PULL_COST} fake coins. No real-money value.`
+        })
+        .setTimestamp();
+
+    await message.channel.send({
+        embeds: [embed]
+    });
 
 }
 
@@ -7796,6 +8454,46 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         return;
     }
 
+    if (command === '!waifuhelp' || command === '!haremhelp') {
+        await handleWaifuHelpCommand(message);
+        return;
+    }
+
+    if (command === '!daily' || command === '!waifudaily') {
+        await handleWaifuDailyCommand(message);
+        return;
+    }
+
+    if (command === '!coins' || command === '!balance' || command === '!waifubalance') {
+        await handleWaifuBalanceCommand(message, args);
+        return;
+    }
+
+    if (command === '!pull' || command === '!waifupull') {
+        await handleWaifuPullCommand(message);
+        return;
+    }
+
+    if (command === '!waifuodds' || command === '!odds') {
+        await handleWaifuOddsCommand(message);
+        return;
+    }
+
+    if (command === '!waifus' || command === '!harem' || command === '!collection') {
+        await handleWaifuCollectionCommand(message, args);
+        return;
+    }
+
+    if (command === '!waifu') {
+        await handleWaifuShowCommand(message, args);
+        return;
+    }
+
+    if (command === '!givecoins' || command === '!givemoney' || command === '!givewaifumoney') {
+        await handleGiveCoinsCommand(message, args);
+        return;
+    }
+
     if (command === '!rank') {
         await handleRankCommand(message, args);
         return;
@@ -7899,6 +8597,8 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!rank [@user]\` - XP/rank.
 \`!toplevels [page]\` - Shows paged level leaderboard.
 \`!synclevels [max-per-channel]\` - Admin: backfills levels from message history.
+\`!waifuhelp\` / \`!pull\` / \`!waifus\` / \`!waifuodds\` - Waifu collector game.
+\`!givecoins @user amount\` - Admin: give fake waifu coins.
 \`!staffapply [details]\` / \`!suggest idea\` - Applications and suggestions.
 \`!automod on/off\` / \`!automod block phrase\` - Auto moderation.
 \`!onboarding [#channel]\` - Sends the welcome/onboarding message.
