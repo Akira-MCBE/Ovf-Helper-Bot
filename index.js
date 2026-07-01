@@ -292,6 +292,12 @@ shoukaku.on('disconnect', (name, count) => {
     console.warn(`⚠️ Lavalink node disconnected: ${name} | Reconnect count: ${count}`);
 });
 
+// Discord.js forwards rejected async event handlers to the client's error
+// event. Always listen for it so one failed command cannot stop the process.
+client.on('error', (error) => {
+    console.error('Discord client error:', error);
+});
+
 // ==========================================
 // READY EVENT
 // ==========================================
@@ -9336,8 +9342,12 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!poll question | option 1 | option 2\` - Button polls.
 \`!rank [@user]\` - XP/rank.
 \`!toplevels [page]\` - Shows paged level leaderboard.
-\`!synclevels [max-per-channel]\` - Admin: backfills levels from message history.
-\`!waifuhelp\` / \`!pull\` / \`!waifus\` / \`!trade\` - Waifu collector game.
+\`!synclevels [max-per-channel]\` - Admin: backfills levels from message history.`
+                },
+                {
+                    name: '🎮 Games and Server Tools',
+                    value:
+`\`!waifuhelp\` / \`!pull\` / \`!waifus\` / \`!trade\` - Waifu collector game.
 \`!pay @user amount\` / \`!sellwaifu id\` - Waifu coins and card selling.
 \`!givecoins @user amount\` / \`!adminpull [@user]\` - Admin waifu tools.
 \`!staffapply [details]\` / \`!suggest idea\` - Applications and suggestions.
@@ -11283,7 +11293,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
 }
 
-client.on('messageCreate', handleMessageCreate);
+client.on('messageCreate', (message) => {
+    void handleMessageCreate(message).catch((error) => {
+        console.error('Message create handler error:', error);
+    });
+});
 
 // ==========================================
 // REACTION ROLE HANDLERS
