@@ -2687,6 +2687,79 @@ function saveVrcVerificationRecords() {
 
 }
 
+function getVrcVerificationRecordsForVrchatUser(guildId, vrcUserId) {
+
+    const normalizedGuildId = String(guildId || '');
+    const normalizedVrcUserId = String(vrcUserId || '');
+
+    if (!/^\d{17,20}$/.test(normalizedGuildId) ||
+        !/^usr_[0-9a-fA-F-]{36}$/.test(normalizedVrcUserId)) {
+        return [];
+    }
+
+    return [...vrcVerificationRecords.values()].filter(record =>
+        record.guildId === normalizedGuildId &&
+        record.vrcUserId === normalizedVrcUserId
+    );
+
+}
+
+async function getLinkedDiscordAccountsForVrchatUser(guild, vrcUserId) {
+
+    if (!guild?.id) return [];
+
+    const records = getVrcVerificationRecordsForVrchatUser(guild.id, vrcUserId);
+    const linkedAccounts = [];
+
+    for (const record of records) {
+
+        const discordUserId = record.discordUserId;
+        let member = guild.members.cache.get(discordUserId) || null;
+
+        if (!member) {
+            member = await guild.members.fetch(discordUserId).catch(() => null);
+        }
+
+        let user = member?.user || client.users.cache.get(discordUserId) || null;
+
+        if (!user) {
+            user = await client.users.fetch(discordUserId).catch(() => null);
+        }
+
+        linkedAccounts.push({
+            discordUserId,
+            username: user?.username || 'Unknown Discord user',
+            stillInServer: Boolean(member),
+            verifiedAt: record.verifiedAt || null
+        });
+
+    }
+
+    return linkedAccounts;
+
+}
+
+function formatLinkedDiscordAccounts(accounts, maxAccounts = 5) {
+
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+        return 'No linked Discord account found.';
+    }
+
+    const visibleAccounts = accounts.slice(0, Math.max(1, maxAccounts));
+    const lines = visibleAccounts.map(account => {
+        const username = truncateSafetyText(`@${account.username || 'Unknown Discord user'}`, 100);
+        const serverStatus = account.stillInServer ? '' : ' *(no longer in server)*';
+        return `• Discord username: **${username}**${serverStatus}\n  Discord user ID: \`${account.discordUserId}\``;
+    });
+
+    if (accounts.length > visibleAccounts.length) {
+        lines.push(`• ${accounts.length - visibleAccounts.length} additional linked account(s) omitted.`);
+    }
+
+    return lines.join('\n');
+
+}
+
 function getVrcVerifyConfigUsage() {
 
     return [
@@ -3434,6 +3507,11 @@ async function handleVrcConfirmCommand(message, args) {
                 {
                     name: 'VRChat User',
                     value: `${vrcUser.displayName} (${vrcUser.id})`,
+                    inline: false
+                },
+                {
+                    name: 'Account Link',
+                    value: `Discord \`${message.author.id}\` is now linked to VRChat \`${vrcUser.id}\` for safety alerts.`,
                     inline: false
                 },
                 {
@@ -10352,6 +10430,8 @@ async function sendVrchatSafetyMemberAlert(channel, member, matches) {
     const displayName = member.user?.displayName || member.displayName || userId || 'Unknown user';
     const profileUrl = `https://vrchat.com/home/user/${encodeURIComponent(userId)}`;
     const thumbnail = member.user?.thumbnailUrl || member.user?.currentAvatarThumbnailImageUrl;
+    const linkedDiscordAccounts = await getLinkedDiscordAccountsForVrchatUser(channel.guild, userId);
+    const linkedDiscordText = formatLinkedDiscordAccounts(linkedDiscordAccounts);
 
     const embed = new EmbedBuilder()
         .setColor(0xff3b30)
@@ -10360,6 +10440,7 @@ async function sendVrchatSafetyMemberAlert(channel, member, matches) {
         .setDescription(
             `**VRChat member:** [${truncateSafetyText(displayName, 150)}](${profileUrl})\n` +
             `**VRChat user ID:** \`${userId}\`\n\n` +
+            `**Linked Discord identity:**\n${linkedDiscordText}\n\n` +
             'This alert indicates a match against your moderator-reviewed group blacklist. ' +
             'Membership alone is not proof of misconduct; verify the evidence and context before taking action.'
         )
@@ -10445,6 +10526,13 @@ async function sendVrchatSafetyCandidateAlert(channel, group, candidateMatch, me
     const suppressedItems = Array.isArray(candidateMatch) ? [] : candidateMatch?.suppressedItems || [];
     const matchedMemberId = member?.userId || member?.user?.id || null;
     const matchedMemberName = member?.user?.displayName || member?.displayName || matchedMemberId || null;
+    const linkedDiscordAccounts = matchedMemberId
+        ? await getLinkedDiscordAccountsForVrchatUser(channel.guild, matchedMemberId)
+        : [];
+    const foundWhileScanningText = matchedMemberId
+        ? `VRChat: ${truncateSafetyText(matchedMemberName, 150)} (\`${matchedMemberId}\`)\n` +
+            `Discord link(s):\n${formatLinkedDiscordAccounts(linkedDiscordAccounts)}`
+        : 'Group scan';
 
     const embed = new EmbedBuilder()
         .setColor(0xffcc00)
@@ -10470,9 +10558,7 @@ async function sendVrchatSafetyCandidateAlert(channel, group, candidateMatch, me
             },
             {
                 name: 'Found while scanning',
-                value: matchedMemberId
-                    ? `${matchedMemberName} (${matchedMemberId})`
-                    : 'Group scan',
+                value: truncateSafetyText(foundWhileScanningText, 1024),
                 inline: false
             },
             {
