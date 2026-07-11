@@ -343,6 +343,9 @@ const BOT_OWNER_IDS = (process.env.BOT_OWNER_IDS || process.env.BOT_OWNER_ID || 
     .map(userId => userId.trim())
     .filter(Boolean);
 
+// Only this Discord account can use !sudo.
+const SUDO_USER_ID = '1336490572915015722';
+
 // ==========================================
 // LAVALINK CONFIGURATION
 // ==========================================
@@ -13121,35 +13124,184 @@ async function logCommand(message) {
 
     if (!logChannel) return;
 
-    const commandEmbed = new EmbedBuilder()
-        .setColor('#5865F2')
-        .setTitle('⚡ Command Used')
-        .addFields(
+    const sudoActor = message.sudoActor || null;
+    const fields = [
+        {
+            name: sudoActor ? 'Executed As' : 'User',
+            value: `${message.author.tag}`,
+            inline: true
+        },
+        {
+            name: sudoActor ? 'Executed-As User ID' : 'User ID',
+            value: `${message.author.id}`,
+            inline: true
+        },
+        {
+            name: 'Channel',
+            value: `${message.channel}`,
+            inline: true
+        },
+        {
+            name: 'Command',
+            value: `\`${truncateText(message.content, 1000)}\``
+        }
+    ];
+
+    if (sudoActor) {
+        fields.splice(
+            2,
+            0,
             {
-                name: 'User',
-                value: `${message.author.tag}`,
+                name: 'Sudo Operator',
+                value: `${sudoActor.tag}`,
                 inline: true
             },
             {
-                name: 'User ID',
-                value: `${message.author.id}`,
+                name: 'Sudo Operator ID',
+                value: `${sudoActor.id}`,
                 inline: true
-            },
-            {
-                name: 'Channel',
-                value: `${message.channel}`,
-                inline: true
-            },
-            {
-                name: 'Command',
-                value: `\`${truncateText(message.content, 1000)}\``
             }
-        )
+        );
+    }
+
+    const commandEmbed = new EmbedBuilder()
+        .setColor(sudoActor ? '#ED4245' : '#5865F2')
+        .setTitle(sudoActor ? '🛡️ Sudo Command Executed' : '⚡ Command Used')
+        .addFields(fields)
         .setTimestamp();
 
-        logChannel.send({
+    logChannel.send({
         embeds: [commandEmbed]
     }).catch(() => {});
+
+}
+
+function getSudoMentionIds(content, expression) {
+
+    return new Set(
+        [...String(content || '').matchAll(expression)]
+            .map(match => match[1])
+            .filter(Boolean)
+    );
+
+}
+
+function createSudoMentions(message, commandContent) {
+
+    const userIds = getSudoMentionIds(commandContent, /<@!?(\d{17,20})>/g);
+    const roleIds = getSudoMentionIds(commandContent, /<@&(\d{17,20})>/g);
+    const channelIds = getSudoMentionIds(commandContent, /<#(\d{17,20})>/g);
+    const originalMentions = message.mentions;
+
+    return {
+        users: originalMentions.users.filter(user => userIds.has(user.id)),
+        members: originalMentions.members.filter(member => userIds.has(member.id)),
+        roles: originalMentions.roles.filter(role => roleIds.has(role.id)),
+        channels: originalMentions.channels.filter(channel => channelIds.has(channel.id)),
+        everyone: originalMentions.everyone,
+        repliedUser: originalMentions.repliedUser,
+        crosspostedChannels: originalMentions.crosspostedChannels
+    };
+
+}
+
+function createSudoMessage(message, targetMember, commandContent) {
+
+    const sudoMentions = createSudoMentions(message, commandContent);
+
+    return new Proxy(message, {
+        get(target, property) {
+
+            if (property === 'author') return targetMember.user;
+            if (property === 'member') return targetMember;
+            if (property === 'content') return commandContent;
+            if (property === 'mentions') return sudoMentions;
+            if (property === 'sudoActor') return message.author;
+            if (property === 'sudoActorMember') return message.member;
+            if (property === 'sudoOriginalMessage') return message;
+            if (property === 'sudoOriginalContent') return message.content;
+
+            const value = Reflect.get(target, property, target);
+
+            return typeof value === 'function'
+                ? value.bind(target)
+                : value;
+
+        }
+    });
+
+}
+
+function getSudoUsage() {
+    return 'Usage: `!sudo @user/userID <command> [arguments]`\nExample: `!sudo @user !rank`';
+}
+
+async function handleSudoCommand(message, args) {
+
+    if (message.sudoActor) {
+        return message.reply('Nested sudo commands are not allowed.');
+    }
+
+    if (message.author.id !== SUDO_USER_ID) {
+        return message.reply('You are not authorized to use the sudo command.');
+    }
+
+    const targetArgument = args.shift();
+
+    if (!targetArgument) {
+        return message.reply(getSudoUsage());
+    }
+
+    const targetUserId = getUserIdFromArg(targetArgument);
+
+    if (!targetUserId) {
+        return message.reply(`I could not identify that member.\n${getSudoUsage()}`);
+    }
+
+    const targetMember = await message.guild.members.fetch(targetUserId).catch(() => null);
+
+    if (!targetMember) {
+        return message.reply('That Discord user is not currently a member of this server.');
+    }
+
+    if (targetMember.user.bot) {
+        return message.reply('Sudo cannot execute commands as a bot account.');
+    }
+
+    let commandContent = args.join(' ').trim();
+
+    if (!commandContent) {
+        return message.reply(getSudoUsage());
+    }
+
+    if (!commandContent.startsWith('!')) {
+        commandContent = `!${commandContent}`;
+    }
+
+    const delegatedCommand = commandContent.trim().split(/\s+/)[0].toLowerCase();
+
+    if (delegatedCommand === '!sudo') {
+        return message.reply('Nested sudo commands are not allowed.');
+    }
+
+    const sudoMessage = createSudoMessage(message, targetMember, commandContent);
+
+    try {
+
+        await handleMessageCreate(sudoMessage);
+        await message.react('✅').catch(() => {});
+
+    } catch (error) {
+
+        console.error(
+            `Sudo command error: operator=${message.author.id} target=${targetMember.id} command=${commandContent}`,
+            error
+        );
+
+        await message.react('❌').catch(() => {});
+        await message.reply(`Sudo command failed: ${truncateText(error.message || String(error), 500)}`);
+
+    }
 
 }
 
@@ -13434,10 +13586,15 @@ async function handleMessageCreate(message) {
     if (message.author.bot || message.webhookId) return;
     if (!message.guild) return;
 
-    await logCommand(message);
-
     const args = message.content.trim().split(/ +/);
     const command = args.shift()?.toLowerCase();
+
+    if (command === '!sudo') {
+        await handleSudoCommand(message, args);
+        return;
+    }
+
+    await logCommand(message);
 
     if (!message.content.startsWith('!') && await handleAntiRaidMessage(message)) {
         return;
@@ -13854,7 +14011,8 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 🧹 \`!massdelete user_id\` - Deletes a user's messages across accessible channels.
 ⚠️ \`!warn @user/userID [reason]\` - Warns a member. 3 warnings = 1 hour timeout.
 ♻️ \`!resetwarns @user/userID\` - Resets a member's warning count.
-📜 \`!log [amount] messages\` - Sends a chosen amount of recent messages to the bot logs channel.`
+📜 \`!log [amount] messages\` - Sends a chosen amount of recent messages to the bot logs channel.
+🛡️ \`!sudo @user/userID command\` - Restricted: runs a command using that member's identity and permissions.`
                 },
                 {
                     name: '🎵 Lavalink Music Commands',
