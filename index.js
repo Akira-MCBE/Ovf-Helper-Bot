@@ -6450,9 +6450,10 @@ function extractVrchatGroupIdFromInput(input) {
 function getVrchatBlacklistGroupUsage() {
 
     return [
-        'Usage: `!blacklistgroup add <groupId/url> [category] [severity] [evidence summary]`',
-        'Quick add: `!blacklistgroup add <groupId/url>`',
-        'Full example: `!blacklistgroup add grp_00000000-0000-0000-0000-000000000000 grooming ban Reviewed evidence summary`',
+        'Quick add: `!blacklistgroup <groupId/url>`',
+        'Example: `!blacklistgroup grp_00000000-0000-0000-0000-000000000000`',
+        'The category, severity, and evidence are filled automatically.',
+        'Legacy/detailed form: `!blacklistgroup add <groupId/url> [category] [severity] [evidence summary]`',
         `Scanner alert categories: ${MINOR_SAFETY_CATEGORIES.map(category => `\`${category}\``).join(', ')}`
     ].join('\n');
 
@@ -6514,14 +6515,17 @@ async function handleVrchatBlacklistGroupCommand(message, args) {
     }
 
     const workingArgs = [...args];
-    const firstToken = String(workingArgs.shift() || '').toLowerCase();
+    const firstArgument = String(workingArgs[0] || '').trim();
+    const firstToken = firstArgument.toLowerCase();
 
-    if (!firstToken || firstToken === 'help') {
+    if (!firstArgument || firstToken === 'help') {
         return message.reply(getVrchatBlacklistGroupUsage());
     }
 
-    if (firstToken !== 'add') {
-        workingArgs.unshift(firstToken);
+    // `add` is optional. The preferred command is:
+    // !blacklistgroup <group ID or VRChat group URL>
+    if (firstToken === 'add') {
+        workingArgs.shift();
     }
 
     const groupInput = workingArgs.shift();
@@ -13772,7 +13776,8 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!vrcaccountstatus\` - Staff: checks the connected VRChat cookie account.
 \`!safetyscan status/run\` - Staff: checks or runs the VRChat safety scanner.
 \`!scanmembergroups\` - Staff: scans members' public VRChat groups and sends a report.
-\`!blacklistgroup add group [category severity evidence]\` - Staff: quick-adds or fully documents a reviewed VRChat group.
+\`!blacklistgroup group\` - Staff: adds a VRChat group immediately; details are filled automatically.
+\`!blacklistgroup add group [category severity evidence]\` - Staff: optional legacy/detailed form.
 \`!vrcverifyconfig\` - Admin config for verified role and logs.
 \`!vrcunverify @user/userID\` - Removes a saved VRC verification.`
                 },
