@@ -423,6 +423,9 @@ let vrchatSafetyState = {
 };
 let vrchatSafetyScannerStarted = false;
 let vrchatSafetyScannerRunning = false;
+let vrchatSafetyScanStopRequested = false;
+let vrchatSafetyScanStopRequestedBy = null;
+let vrchatSafetyScannerCurrentTrigger = null;
 let vrchatSafetyScannerInterval = null;
 let vrchatMemberGroupScanRunning = false;
 let vrchatApiRequestQueue = Promise.resolve();
@@ -4432,6 +4435,9 @@ const RESTRICTED_SLASH_COMMAND_NAMES = new Set([
     'restart',
     'resetwarns',
     'safetyscan',
+    'stopscan',
+    'stopsafetyscan',
+    'cancelscan',
     'scanblacklist',
     'scanblacklisted',
     'blacklistscan',
@@ -5294,7 +5300,7 @@ function getVrcLoggerCommandList() {
         '`!uptime`, `!restart`, `!reloadcmd`',
         '**VRChat / VRCLogger**',
         '`!vrcaccountstatus`, `!vrccheck`, `!vrcban`, `!vrcunban`, `!vrckick`',
-        '`!safetyscan`, `!scanblacklist`, `!scanmembergroups`, `!blacklistgroup`',
+        '`!safetyscan`, `!stopscan`, `!scanblacklist`, `!scanmembergroups`, `!blacklistgroup`',
         '`!vrcuserbl`, `!vrcavibl`, `!vrcgroupsbl`',
         '`!vrcaddstaff`, `!vrcremovestaff`, `!vrcupdatestaff`',
         '`!vrcaddadmin`, `!vrcremoveadmin`, `!vrcmanageapikey`'
@@ -9825,6 +9831,12 @@ function getVrchatSafetyScannerStatusText() {
         `VRChat safety scanner: ${missingSettings.length ? 'disabled' : 'configured'}.`,
         missingSettings.length ? `Missing: ${missingSettings.join(', ')}` : null,
         `Running now: ${vrchatSafetyScannerRunning ? 'yes' : 'no'}.`,
+        vrchatSafetyScannerRunning
+            ? `Current scan: ${vrchatSafetyScannerCurrentTrigger || 'unknown'}.`
+            : null,
+        vrchatSafetyScannerRunning
+            ? `Stop requested: ${vrchatSafetyScanStopRequested ? 'yes' : 'no'}.`
+            : null,
         `VRChat auth: ${VRCHAT_AUTH_COOKIE ? 'cookie configured' : 'public/no-account mode'}.`,
         `Reviewed safety groups loaded: ${activeEntries.length}.`,
         `Candidate discovery: ${DISCOVER_CANDIDATE_GROUPS ? 'on' : 'off'}.`,
@@ -9855,7 +9867,9 @@ async function fetchVrchatGroupMembersPage(groupId, offset = 0, pageSize = 100) 
 
 }
 
-async function fetchAllVrchatGroupMembers(groupId) {
+async function fetchAllVrchatGroupMembers(groupId, {
+    shouldStop = () => false
+} = {}) {
 
     const members = [];
     const pageSize = 100;
@@ -9863,20 +9877,24 @@ async function fetchAllVrchatGroupMembers(groupId) {
 
     while (true) {
 
+        if (shouldStop()) break;
+
         const page = await fetchVrchatGroupMembersPage(groupId, offset, pageSize);
 
         members.push(...page);
 
-        if (page.length < pageSize) break;
+        if (page.length < pageSize || shouldStop()) break;
 
         offset += pageSize;
 
     }
 
-    const group = await fetchVrchatGroup(groupId).catch(error => {
-        console.warn('Failed to fetch VRChat group details for safety scanner:', error.message);
-        return null;
-    });
+    const group = shouldStop()
+        ? null
+        : await fetchVrchatGroup(groupId).catch(error => {
+            console.warn('Failed to fetch VRChat group details for safety scanner:', error.message);
+            return null;
+        });
 
     const myMemberUserId = group?.myMember?.userId;
 
@@ -10623,10 +10641,44 @@ async function sendVrchatSafetyCandidateAlert(channel, group, candidateMatch, me
 
 }
 
+function requestVrchatSafetyScanStop(requestedBy = null) {
+
+    if (!vrchatSafetyScannerRunning) {
+        return {
+            requested: false,
+            reason: 'No VRChat safety scan is currently running.'
+        };
+    }
+
+    vrchatSafetyScanStopRequested = true;
+    vrchatSafetyScanStopRequestedBy = requestedBy || null;
+
+    return {
+        requested: true,
+        reason: 'Stop requested. The scan will exit after the current VRChat request finishes.'
+    };
+
+}
+
+async function waitForVrchatSafetyScanToStop(timeoutMs = 30000) {
+
+    const deadline = Date.now() + Math.max(1000, timeoutMs);
+
+    while (vrchatSafetyScannerRunning && Date.now() < deadline) {
+        await wait(250);
+    }
+
+    return !vrchatSafetyScannerRunning;
+
+}
+
 function formatVrchatSafetyScanResult(result) {
 
     if (result.skipped) return result.reason;
 
+    const cancelledText = result.cancelled
+        ? ` Scan stopped by request${result.cancelledBy ? ` from Discord user ${result.cancelledBy}` : ''}.`
+        : '';
     const rateLimitText = result.rateLimited
         ? ` Scan stopped early because VRChat rate limited requests; retry in about ${Math.max(1, Math.ceil((result.rateLimitRetryAfterMs || VRCHAT_RATE_LIMIT_BACKOFF_MS) / 60000))} minute(s).`
         : '';
@@ -10635,16 +10687,16 @@ function formatVrchatSafetyScanResult(result) {
     const cooldownText = `${result.cooldownSuppressedMembers || 0} alert(s) suppressed by cooldown`;
 
     if (result.blacklistOnly) {
-        return `Blacklist-only scan complete: checked ${result.checked}/${result.totalMembers} members; ` +
+        return `${result.cancelled ? 'Blacklist-only scan stopped' : 'Blacklist-only scan complete'}: checked ${result.checked}/${result.totalMembers} members; ` +
             `${matchedText}; ${alertText}; ${cooldownText}; ` +
-            `${result.failedMembers} member lookup failure(s).${rateLimitText}`;
+            `${result.failedMembers} member lookup failure(s).${cancelledText}${rateLimitText}`;
     }
 
-    return `Scan complete: checked ${result.checked}/${result.totalMembers} members; ` +
+    return `${result.cancelled ? 'Scan stopped' : 'Scan complete'}: checked ${result.checked}/${result.totalMembers} members; ` +
         `${matchedText}; ${alertText}; ${cooldownText}; ` +
         `${result.candidateGroups} candidate group alert(s), ` +
         `${result.failedMembers} member lookup failure(s), ` +
-        `${result.candidateDetailLookups || 0} candidate detail lookup(s).${rateLimitText}`;
+        `${result.candidateDetailLookups || 0} candidate detail lookup(s).${cancelledText}${rateLimitText}`;
 
 }
 
@@ -10657,7 +10709,7 @@ async function runVrchatSafetyScan({
     if (vrchatSafetyScannerRunning) {
         return {
             skipped: true,
-            reason: 'A VRChat safety scan is already running.'
+            reason: 'A VRChat safety scan is already running. Use `!stopscan` and wait for it to stop before starting another scan.'
         };
     }
 
@@ -10671,6 +10723,9 @@ async function runVrchatSafetyScan({
     }
 
     vrchatSafetyScannerRunning = true;
+    vrchatSafetyScanStopRequested = false;
+    vrchatSafetyScanStopRequestedBy = null;
+    vrchatSafetyScannerCurrentTrigger = trigger;
     const startedAt = Date.now();
     let checked = 0;
     let matchedMembers = 0;
@@ -10680,12 +10735,22 @@ async function runVrchatSafetyScan({
     let candidateGroups = 0;
     let rateLimited = false;
     let rateLimitRetryAfterMs = 0;
+    let cancelled = false;
 
     try {
 
         loadVrchatSafetyBlacklist();
 
-        const members = await fetchAllVrchatGroupMembers(MONITORED_VRCHAT_GROUP_ID);
+        const members = await fetchAllVrchatGroupMembers(
+            MONITORED_VRCHAT_GROUP_ID,
+            {
+                shouldStop: () => vrchatSafetyScanStopRequested
+            }
+        );
+
+        if (vrchatSafetyScanStopRequested) {
+            cancelled = true;
+        }
         const verifiedByGroupId = getVrchatSafetyBlacklistByGroupId();
         const allBlacklistedGroupIds = new Set([...vrchatSafetyBlacklist.keys()]);
         const candidateGroupDetailCache = new Map();
@@ -10703,6 +10768,11 @@ async function runVrchatSafetyScan({
 
         for (const member of members) {
 
+            if (vrchatSafetyScanStopRequested) {
+                cancelled = true;
+                break;
+            }
+
             const userId = member.userId || member.user?.id;
             const displayName = member.user?.displayName || member.displayName || userId || 'Unknown user';
 
@@ -10711,6 +10781,12 @@ async function runVrchatSafetyScan({
             try {
 
                 const publicGroups = await fetchVrchatUserGroups(userId);
+
+                if (vrchatSafetyScanStopRequested) {
+                    cancelled = true;
+                    break;
+                }
+
                 checked += 1;
 
                 const matches = publicGroups
@@ -10750,6 +10826,11 @@ async function runVrchatSafetyScan({
                 if (!blacklistOnly && DISCOVER_CANDIDATE_GROUPS && candidateChannel) {
 
                     for (const group of publicGroups) {
+
+                        if (vrchatSafetyScanStopRequested) {
+                            cancelled = true;
+                            break;
+                        }
 
                         const groupId = group.groupId || group.id;
 
@@ -10800,6 +10881,11 @@ async function runVrchatSafetyScan({
 
             }
 
+            if (vrchatSafetyScanStopRequested) {
+                cancelled = true;
+                break;
+            }
+
             await wait(SAFETY_SCAN_DELAY_MS);
 
         }
@@ -10820,6 +10906,8 @@ async function runVrchatSafetyScan({
             candidateDetailBudgetReached: candidateDetailState.disabled && !candidateDetailState.rateLimited,
             rateLimited,
             rateLimitRetryAfterMs,
+            cancelled,
+            cancelledBy: cancelled ? vrchatSafetyScanStopRequestedBy : null,
             durationMs: Date.now() - startedAt
         };
 
@@ -10834,6 +10922,9 @@ async function runVrchatSafetyScan({
     } finally {
 
         vrchatSafetyScannerRunning = false;
+        vrchatSafetyScanStopRequested = false;
+        vrchatSafetyScanStopRequestedBy = null;
+        vrchatSafetyScannerCurrentTrigger = null;
 
     }
 
@@ -10931,6 +11022,36 @@ async function runSafetyScanFromMessage(message, {
 
 }
 
+async function handleStopSafetyScanCommand(message) {
+
+    if (!hasSafetyCommandAccess(message.member)) {
+        return message.reply('No permission.');
+    }
+
+    const stopResult = requestVrchatSafetyScanStop(message.author.id);
+
+    if (!stopResult.requested) {
+        return message.reply(stopResult.reason);
+    }
+
+    const statusMessage = await message.reply(
+        `${stopResult.reason} Waiting for the scanner lock to be released...`
+    );
+
+    const stopped = await waitForVrchatSafetyScanToStop(30000);
+
+    if (stopped) {
+        return statusMessage.edit(
+            'VRChat safety scan stopped. You can now run `!scanblacklist`.'
+        );
+    }
+
+    return statusMessage.edit(
+        'Stop is still pending because the current VRChat request has not finished yet. Check `!safetyscan status`, then run `!scanblacklist` once “Running now” shows “no”.'
+    );
+
+}
+
 async function handleSafetyScanMessageCommand(message, args) {
 
     if (!hasSafetyCommandAccess(message.member)) {
@@ -10943,6 +11064,10 @@ async function handleSafetyScanMessageCommand(message, args) {
         return message.reply(getVrchatSafetyScannerStatusText());
     }
 
+    if (['stop', 'cancel', 'abort'].includes(subcommand)) {
+        return handleStopSafetyScanCommand(message);
+    }
+
     if (['blacklist', 'blacklisted', 'blacklist-only'].includes(subcommand)) {
         return runSafetyScanFromMessage(message, {
             blacklistOnly: true
@@ -10951,7 +11076,7 @@ async function handleSafetyScanMessageCommand(message, args) {
 
     if (subcommand !== 'run') {
         return message.reply(
-            'Usage: `!safetyscan status`, `!safetyscan run`, or `!safetyscan blacklist`'
+            'Usage: `!safetyscan status`, `!safetyscan run`, `!safetyscan blacklist`, or `!safetyscan stop`'
         );
     }
 
@@ -13989,7 +14114,8 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!vrclinked [@user/userID]\` - Shows a linked VRChat account.
 \`!syncnick\` - Syncs your nickname to your verified VRChat name.
 \`!vrcaccountstatus\` - Staff: checks the connected VRChat cookie account.
-\`!safetyscan status/run/blacklist\` - Staff: checks or runs the VRChat safety scanner.
+\`!safetyscan status/run/blacklist/stop\` - Staff: checks, runs, or stops the VRChat safety scanner.
+\`!stopscan\` - Staff: safely stops the active safety scan and releases the scanner lock.
 \`!scanblacklist\` - Staff: checks members only against already-blacklisted groups.
 \`!scanmembergroups\` - Staff: scans members' public VRChat groups and sends a report.
 \`!blacklistgroup group\` - Staff: adds a VRChat group immediately; details are filled automatically.
@@ -14142,6 +14268,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!safetyscan' || command === '!vrchatscan') {
         await handleSafetyScanMessageCommand(message, args);
+        return;
+    }
+
+    if (command === '!stopscan' || command === '!stopsafetyscan' || command === '!cancelscan') {
+        await handleStopSafetyScanCommand(message);
         return;
     }
 
