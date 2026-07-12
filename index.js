@@ -4432,6 +4432,9 @@ const RESTRICTED_SLASH_COMMAND_NAMES = new Set([
     'restart',
     'resetwarns',
     'safetyscan',
+    'scanblacklist',
+    'scanblacklisted',
+    'blacklistscan',
     'scanmembergroups',
     'scanvrcgroups',
     'staffpanel',
@@ -5291,7 +5294,7 @@ function getVrcLoggerCommandList() {
         '`!uptime`, `!restart`, `!reloadcmd`',
         '**VRChat / VRCLogger**',
         '`!vrcaccountstatus`, `!vrccheck`, `!vrcban`, `!vrcunban`, `!vrckick`',
-        '`!safetyscan`, `!scanmembergroups`, `!blacklistgroup`',
+        '`!safetyscan`, `!scanblacklist`, `!scanmembergroups`, `!blacklistgroup`',
         '`!vrcuserbl`, `!vrcavibl`, `!vrcgroupsbl`',
         '`!vrcaddstaff`, `!vrcremovestaff`, `!vrcupdatestaff`',
         '`!vrcaddadmin`, `!vrcremoveadmin`, `!vrcmanageapikey`'
@@ -10627,9 +10630,19 @@ function formatVrchatSafetyScanResult(result) {
     const rateLimitText = result.rateLimited
         ? ` Scan stopped early because VRChat rate limited requests; retry in about ${Math.max(1, Math.ceil((result.rateLimitRetryAfterMs || VRCHAT_RATE_LIMIT_BACKOFF_MS) / 60000))} minute(s).`
         : '';
+    const matchedText = `${result.matchedMembers || 0} member(s) matched a blacklisted group`;
+    const alertText = `${result.flaggedMembers || 0} alert(s) sent`;
+    const cooldownText = `${result.cooldownSuppressedMembers || 0} alert(s) suppressed by cooldown`;
+
+    if (result.blacklistOnly) {
+        return `Blacklist-only scan complete: checked ${result.checked}/${result.totalMembers} members; ` +
+            `${matchedText}; ${alertText}; ${cooldownText}; ` +
+            `${result.failedMembers} member lookup failure(s).${rateLimitText}`;
+    }
 
     return `Scan complete: checked ${result.checked}/${result.totalMembers} members; ` +
-        `${result.flaggedMembers} member alert(s), ${result.candidateGroups} candidate group alert(s), ` +
+        `${matchedText}; ${alertText}; ${cooldownText}; ` +
+        `${result.candidateGroups} candidate group alert(s), ` +
         `${result.failedMembers} member lookup failure(s), ` +
         `${result.candidateDetailLookups || 0} candidate detail lookup(s).${rateLimitText}`;
 
@@ -10637,7 +10650,8 @@ function formatVrchatSafetyScanResult(result) {
 
 async function runVrchatSafetyScan({
     trigger = 'manual',
-    requestedBy = null
+    requestedBy = null,
+    blacklistOnly = false
 } = {}) {
 
     if (vrchatSafetyScannerRunning) {
@@ -10659,7 +10673,9 @@ async function runVrchatSafetyScan({
     vrchatSafetyScannerRunning = true;
     const startedAt = Date.now();
     let checked = 0;
+    let matchedMembers = 0;
     let flaggedMembers = 0;
+    let cooldownSuppressedMembers = 0;
     let failedMembers = 0;
     let candidateGroups = 0;
     let rateLimited = false;
@@ -10675,13 +10691,13 @@ async function runVrchatSafetyScan({
         const candidateGroupDetailCache = new Map();
         const candidateDetailState = {
             lookups: 0,
-            maxLookups: VRCHAT_CANDIDATE_MAX_DETAIL_LOOKUPS_PER_SCAN,
-            disabled: VRCHAT_CANDIDATE_MAX_DETAIL_LOOKUPS_PER_SCAN === 0,
+            maxLookups: blacklistOnly ? 0 : VRCHAT_CANDIDATE_MAX_DETAIL_LOOKUPS_PER_SCAN,
+            disabled: blacklistOnly || VRCHAT_CANDIDATE_MAX_DETAIL_LOOKUPS_PER_SCAN === 0,
             rateLimited: false,
             retryAfterMs: 0
         };
         const alertChannel = await getVrchatSafetyTextChannel(SAFETY_ALERT_CHANNEL_ID);
-        const candidateChannel = DISCOVER_CANDIDATE_GROUPS
+        const candidateChannel = !blacklistOnly && DISCOVER_CANDIDATE_GROUPS
             ? await getVrchatSafetyTextChannel(CANDIDATE_REVIEW_CHANNEL_ID)
             : null;
 
@@ -10712,6 +10728,8 @@ async function runVrchatSafetyScan({
 
                 if (matches.length > 0) {
 
+                    matchedMembers += 1;
+
                     const shouldNotify = matches.some(match =>
                         shouldNotifyVrchatSafetyMatch(userId, match.blacklist.group_id)
                     );
@@ -10723,11 +10741,13 @@ async function runVrchatSafetyScan({
                             matches.map(match => match.blacklist.group_id)
                         );
                         flaggedMembers += 1;
+                    } else {
+                        cooldownSuppressedMembers += 1;
                     }
 
                 }
 
-                if (DISCOVER_CANDIDATE_GROUPS && candidateChannel) {
+                if (!blacklistOnly && DISCOVER_CANDIDATE_GROUPS && candidateChannel) {
 
                     for (const group of publicGroups) {
 
@@ -10788,9 +10808,12 @@ async function runVrchatSafetyScan({
             skipped: false,
             trigger,
             requestedBy,
+            blacklistOnly,
             totalMembers: members.length,
             checked,
+            matchedMembers,
             flaggedMembers,
+            cooldownSuppressedMembers,
             candidateGroups,
             failedMembers,
             candidateDetailLookups: candidateDetailState.lookups,
@@ -10878,6 +10901,36 @@ function startVrchatSafetyScanner() {
 
 }
 
+async function runSafetyScanFromMessage(message, {
+    blacklistOnly = false
+} = {}) {
+
+    const statusMessage = await message.reply(
+        blacklistOnly
+            ? 'Starting blacklist-only VRChat scan...'
+            : 'Starting VRChat safety scan...'
+    );
+
+    try {
+
+        const result = await runVrchatSafetyScan({
+            trigger: blacklistOnly ? 'manual-blacklist-only' : 'manual',
+            requestedBy: message.author.id,
+            blacklistOnly
+        });
+
+        await statusMessage.edit(formatVrchatSafetyScanResult(result));
+
+    } catch (error) {
+
+        await statusMessage.edit(
+            `${blacklistOnly ? 'Blacklist-only scan' : 'Safety scan'} failed: ${truncateText(error.message, 300)}`
+        );
+
+    }
+
+}
+
 async function handleSafetyScanMessageCommand(message, args) {
 
     if (!hasSafetyCommandAccess(message.member)) {
@@ -10890,26 +10943,31 @@ async function handleSafetyScanMessageCommand(message, args) {
         return message.reply(getVrchatSafetyScannerStatusText());
     }
 
-    if (subcommand !== 'run') {
-        return message.reply('Usage: `!safetyscan status` or `!safetyscan run`');
-    }
-
-    const statusMessage = await message.reply('Starting VRChat safety scan...');
-
-    try {
-
-        const result = await runVrchatSafetyScan({
-            trigger: 'manual',
-            requestedBy: message.author.id
+    if (['blacklist', 'blacklisted', 'blacklist-only'].includes(subcommand)) {
+        return runSafetyScanFromMessage(message, {
+            blacklistOnly: true
         });
-
-        await statusMessage.edit(formatVrchatSafetyScanResult(result));
-
-    } catch (error) {
-
-        await statusMessage.edit(`Safety scan failed: ${truncateText(error.message, 300)}`);
-
     }
+
+    if (subcommand !== 'run') {
+        return message.reply(
+            'Usage: `!safetyscan status`, `!safetyscan run`, or `!safetyscan blacklist`'
+        );
+    }
+
+    return runSafetyScanFromMessage(message);
+
+}
+
+async function handleBlacklistOnlySafetyScanCommand(message) {
+
+    if (!hasSafetyCommandAccess(message.member)) {
+        return message.reply('No permission.');
+    }
+
+    return runSafetyScanFromMessage(message, {
+        blacklistOnly: true
+    });
 
 }
 
@@ -13931,7 +13989,8 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!vrclinked [@user/userID]\` - Shows a linked VRChat account.
 \`!syncnick\` - Syncs your nickname to your verified VRChat name.
 \`!vrcaccountstatus\` - Staff: checks the connected VRChat cookie account.
-\`!safetyscan status/run\` - Staff: checks or runs the VRChat safety scanner.
+\`!safetyscan status/run/blacklist\` - Staff: checks or runs the VRChat safety scanner.
+\`!scanblacklist\` - Staff: checks members only against already-blacklisted groups.
 \`!scanmembergroups\` - Staff: scans members' public VRChat groups and sends a report.
 \`!blacklistgroup group\` - Staff: adds a VRChat group immediately; details are filled automatically.
 \`!blacklistgroup add group [category severity evidence]\` - Staff: optional legacy/detailed form.
@@ -14083,6 +14142,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!safetyscan' || command === '!vrchatscan') {
         await handleSafetyScanMessageCommand(message, args);
+        return;
+    }
+
+    if (command === '!scanblacklist' || command === '!scanblacklisted' || command === '!blacklistscan') {
+        await handleBlacklistOnlySafetyScanCommand(message);
         return;
     }
 
