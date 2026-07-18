@@ -11082,7 +11082,7 @@ function startVrchatSafetyScanner() {
         vrchatSafetyScannerInterval = setInterval(runScheduledSafetyScan, SAFETY_SCAN_INTERVAL_MS);
     }
 
-    if (process.env.RUN_SAFETY_SCAN_ON_START !== 'false') {
+    if (process.env.RUN_SAFETY_SCAN_ON_START === 'true') {
         setTimeout(() => {
             runVrchatSafetyScan({
                 trigger: 'startup'
@@ -11090,6 +11090,8 @@ function startVrchatSafetyScanner() {
                 console.error('Startup VRChat safety scan failed:', error);
             });
         }, 5000);
+    } else {
+        console.log('Startup VRChat safety scan skipped. Set RUN_SAFETY_SCAN_ON_START=true to enable it.');
     }
 
     console.log(`VRChat safety scanner started for ${MONITORED_VRCHAT_GROUP_ID}.`);
@@ -16379,16 +16381,20 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!vrcconfirm [VRChatName]\` - Checks your profile and gives the verified role.
 \`!vrclinked [@user/userID]\` - Shows a linked VRChat account.
 \`!syncnick\` - Syncs your nickname to your verified VRChat name.
-\`!vrcaccountstatus\` - Staff: checks the connected VRChat cookie account.
-\`!autoinvite status/on/off\` - Staff: manages VRChat group auto-invites.
-\`!safetyscan status/run/blacklist/stop\` - Staff: checks, runs, or stops the VRChat safety scanner.
-\`!stopscan\` - Staff: safely stops the active safety scan and releases the scanner lock.
-\`!scanblacklist\` - Staff: checks members only against already-blacklisted groups.
-\`!scanmembergroups\` - Staff: scans members' public VRChat groups and sends a report.
-\`!blacklistgroup group\` - Staff: adds a VRChat group immediately; details are filled automatically.
-\`!blacklistgroup add group [category severity evidence]\` - Staff: optional legacy/detailed form.
 \`!vrcverifyconfig\` - Admin config for verified role and logs.
 \`!vrcunverify @user/userID\` - Removes a saved VRC verification.`
+                },
+                {
+                    name: 'Staff VRChat Tools',
+                    value:
+`\`!vrcaccountstatus\` - Checks the connected VRChat cookie account.
+\`!autoinvite status/on/off\` - Manages VRChat group auto-invites.
+\`!safetyscan status/run/blacklist/stop\` - Checks, runs, or stops the VRChat safety scanner.
+\`!stopscan\` - Safely stops the active safety scan and releases the scanner lock.
+\`!scanblacklist\` - Checks members only against already-blacklisted groups.
+\`!scanmembergroups\` - Scans members' public VRChat groups and sends a report.
+\`!blacklistgroup group\` - Adds a VRChat group immediately; details are filled automatically.
+\`!blacklistgroup add group [category severity evidence]\` - Optional legacy/detailed form.`
                 },
                 {
                     name: '🎫 Ticket Commands',
