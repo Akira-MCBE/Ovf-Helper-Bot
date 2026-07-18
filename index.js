@@ -345,8 +345,7 @@ const VRCHAT_AUTO_INVITE_GROUP_ID = process.env.VRCHAT_AUTO_INVITE_GROUP_ID ||
     VRCHAT_GROUP_ID ||
     DEFAULT_VRCHAT_GROUP_ID;
 const VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID = process.env.VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID ||
-    VRCHAT_AUDIT_LOG_CHANNEL_ID ||
-    LOG_CHANNEL_ID;
+    '1516259462124404827';
 const VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID = process.env.VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID || '';
 const VRCHAT_AUTO_INVITE_JOIN_ROLE_ID = process.env.VRCHAT_AUTO_INVITE_JOIN_ROLE_ID || '';
 const DEFAULT_VRCHAT_AUTO_INVITE_ENABLED = process.env.VRCHAT_AUTO_INVITE_ENABLED === 'true';
@@ -12436,7 +12435,7 @@ function normalizeVrchatAutoInviteStore(savedStore = {}) {
 
     config.enabled = Boolean(config.enabled);
     config.groupId = String(config.groupId || defaults.config.groupId || '').trim();
-    config.logChannelId = String(config.logChannelId || defaults.config.logChannelId || '').trim();
+    config.logChannelId = VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID;
     config.cooldownHours = coerceVrchatAutoInviteNumber(
         config.cooldownHours,
         defaults.config.cooldownHours,
