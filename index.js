@@ -338,6 +338,68 @@ const VRCHAT_MEMBER_GROUP_SCAN_DELAY_MS = Math.max(
     250,
     Number.parseInt(process.env.VRCHAT_MEMBER_GROUP_SCAN_DELAY_MS || '', 10) || SAFETY_SCAN_DELAY_MS
 );
+const VRCHAT_AUTO_INVITE_STORE_FILE = process.env.VRCHAT_AUTO_INVITE_STORE_FILE ||
+    path.join(process.cwd(), 'vrchat-auto-invites.json');
+const VRCHAT_AUTO_INVITE_GROUP_ID = process.env.VRCHAT_AUTO_INVITE_GROUP_ID ||
+    MONITORED_VRCHAT_GROUP_ID ||
+    VRCHAT_GROUP_ID ||
+    DEFAULT_VRCHAT_GROUP_ID;
+const VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID = process.env.VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID ||
+    VRCHAT_AUDIT_LOG_CHANNEL_ID ||
+    LOG_CHANNEL_ID;
+const VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID = process.env.VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID || '';
+const VRCHAT_AUTO_INVITE_JOIN_ROLE_ID = process.env.VRCHAT_AUTO_INVITE_JOIN_ROLE_ID || '';
+const DEFAULT_VRCHAT_AUTO_INVITE_ENABLED = process.env.VRCHAT_AUTO_INVITE_ENABLED === 'true';
+const DEFAULT_VRCHAT_AUTO_INVITE_COOLDOWN_HOURS = Math.max(
+    1,
+    Number.parseFloat(process.env.VRCHAT_AUTO_INVITE_COOLDOWN_HOURS || '168') || 168
+);
+const DEFAULT_VRCHAT_AUTO_INVITE_DELAY_SECONDS = Math.max(
+    1,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_DELAY_SECONDS || '15', 10) || 15
+);
+const DEFAULT_VRCHAT_AUTO_INVITE_MAX_PER_HOUR = Math.max(
+    0,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_MAX_PER_HOUR || '20', 10) || 20
+);
+const DEFAULT_VRCHAT_AUTO_INVITE_MAX_PER_DAY = Math.max(
+    0,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_MAX_PER_DAY || '100', 10) || 100
+);
+const VRCHAT_AUTO_INVITE_POLL_INTERVAL_MS = Math.max(
+    60 * 1000,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_POLL_INTERVAL_MS || '', 10) ||
+        (Number.parseFloat(process.env.VRCHAT_AUTO_INVITE_POLL_INTERVAL_MINUTES || '2') || 2) * 60 * 1000
+);
+const VRCHAT_AUTO_INVITE_PENDING_CACHE_MS = Math.max(
+    60 * 1000,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_PENDING_CACHE_MS || '', 10) || 5 * 60 * 1000
+);
+const VRCHAT_AUTO_INVITE_MEMBER_CACHE_MS = Math.max(
+    60 * 1000,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_MEMBER_CACHE_MS || '', 10) || 10 * 60 * 1000
+);
+const VRCHAT_AUTO_INVITE_HISTORY_LIMIT = Math.max(
+    100,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_HISTORY_LIMIT || '2000', 10) || 2000
+);
+const VRCHAT_AUTO_INVITE_MAX_QUEUE_SIZE = Math.max(
+    1,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_MAX_QUEUE_SIZE || '500', 10) || 500
+);
+const VRCHAT_AUTO_INVITE_MAX_RETRIES = Math.max(
+    0,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_MAX_RETRIES || '3', 10) || 3
+);
+const VRCHAT_AUTO_INVITE_RETRY_DELAY_MS = Math.max(
+    60 * 1000,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_RETRY_DELAY_MS || '', 10) ||
+        (Number.parseFloat(process.env.VRCHAT_AUTO_INVITE_RETRY_DELAY_MINUTES || '30') || 30) * 60 * 1000
+);
+const VRCHAT_AUTO_INVITE_SKIP_LOG_COOLDOWN_MS = Math.max(
+    60 * 1000,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_SKIP_LOG_COOLDOWN_MS || '', 10) || 60 * 60 * 1000
+);
 const BOT_OWNER_IDS = (process.env.BOT_OWNER_IDS || process.env.BOT_OWNER_ID || '')
     .split(',')
     .map(userId => userId.trim())
@@ -446,6 +508,21 @@ let vrchatAuditPollRunning = false;
 let vrchatAuditPollInterval = null;
 let vrchatAuditNextAllowedAt = 0;
 
+// VRChat auto-invite state
+let vrchatAutoInviteStore = null;
+let vrchatAutoInviteWorkerStarted = false;
+let vrchatAutoInviteScanRunning = false;
+let vrchatAutoInviteQueueRunning = false;
+let vrchatAutoInviteScanInterval = null;
+let vrchatAutoInviteQueueTimer = null;
+let vrchatAutoInviteLastInviteSentAt = 0;
+let vrchatAutoInvitePendingCache = {
+    groupId: null,
+    refreshedAt: 0,
+    userIds: new Set()
+};
+const vrchatAutoInviteMemberCache = new Map();
+
 // ==========================================
 // LAVALINK / SHOUKAKU SETUP
 // ==========================================
@@ -521,6 +598,7 @@ client.once('clientReady', async () => {
     loadWaifuPlayers();
     loadVrchatSafetyBlacklist();
     loadVrchatSafetyState();
+    loadVrchatAutoInviteStore();
 
     client.user.setPresence({
     activities: [
@@ -559,6 +637,7 @@ client.once('clientReady', async () => {
     startVrchatGroupPostWatcher();
     startVrchatAuditLogWatcher();
     startVrchatSafetyScanner();
+    startVrchatAutoInviteWorker();
     scheduleTempRoleRemovals();
     scheduleGiveawayEnds();
     startEventReminderWorker();
@@ -2840,6 +2919,7 @@ class VrchatRateLimitError extends Error {
         super(`VRChat rate limited requests. Scanner paused for about ${retryMinutes} minute(s).`);
         this.name = 'VrchatRateLimitError';
         this.code = 'VRCHAT_RATE_LIMITED';
+        this.statusCode = 429;
         this.retryAfterMs = safeRetryAfterMs;
         this.source = source;
 
@@ -2962,13 +3042,21 @@ async function requestVrchatApiJson(method, endpointPath, {
         const errorMessage = payload?.error?.message || payload?.message || response.statusText;
 
         if ((response.status === 401 || response.status === 403) && !VRCHAT_AUTH_COOKIE) {
-            throw new Error(
+            const error = new Error(
                 `VRChat rejected the public request for ${endpointPath}. ` +
                 'This VRChat endpoint may require authentication or a backend service.'
             );
+            error.statusCode = response.status;
+            error.payload = payload;
+            error.endpointPath = endpointPath;
+            throw error;
         }
 
-        throw new Error(`VRChat API returned ${response.status}: ${errorMessage}`);
+        const error = new Error(`VRChat API returned ${response.status}: ${errorMessage}`);
+        error.statusCode = response.status;
+        error.payload = payload;
+        error.endpointPath = endpointPath;
+        throw error;
     }
 
     return payload;
@@ -4306,6 +4394,7 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'appeal',
     'ask',
     'avatar',
+    'autoinvite',
     'ban',
     'case',
     'cases',
@@ -4407,6 +4496,7 @@ const RESTRICTED_SLASH_COMMAND_NAMES = new Set([
     'addrole',
     'aboutbot',
     'automod',
+    'autoinvite',
     'ban',
     'blacklistgroup',
     'case',
@@ -12267,6 +12357,1823 @@ function startVrchatAuditLogWatcher() {
 
 }
 
+// ==========================================
+// VRCHAT AUTO INVITE SYSTEM
+// ==========================================
+
+function coerceVrchatAutoInviteNumber(value, fallback, {
+    min = 0,
+    max = Number.MAX_SAFE_INTEGER,
+    integer = true
+} = {}) {
+
+    const parsed = integer
+        ? Number.parseInt(value, 10)
+        : Number.parseFloat(value);
+
+    if (!Number.isFinite(parsed)) return fallback;
+
+    const clamped = Math.max(min, Math.min(max, parsed));
+
+    return integer ? Math.floor(clamped) : clamped;
+
+}
+
+function getDefaultVrchatAutoInviteConfig() {
+
+    return {
+        enabled: DEFAULT_VRCHAT_AUTO_INVITE_ENABLED,
+        groupId: VRCHAT_AUTO_INVITE_GROUP_ID,
+        logChannelId: VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID,
+        cooldownHours: DEFAULT_VRCHAT_AUTO_INVITE_COOLDOWN_HOURS,
+        delaySeconds: DEFAULT_VRCHAT_AUTO_INVITE_DELAY_SECONDS,
+        maxPerHour: DEFAULT_VRCHAT_AUTO_INVITE_MAX_PER_HOUR,
+        maxPerDay: DEFAULT_VRCHAT_AUTO_INVITE_MAX_PER_DAY,
+        maxRetries: VRCHAT_AUTO_INVITE_MAX_RETRIES
+    };
+
+}
+
+function getDefaultVrchatAutoInviteStore() {
+
+    return {
+        version: 1,
+        config: getDefaultVrchatAutoInviteConfig(),
+        ignoredUsers: {},
+        users: {},
+        queue: [],
+        history: []
+    };
+
+}
+
+function normalizeVrchatAutoInviteStore(savedStore = {}) {
+
+    const defaults = getDefaultVrchatAutoInviteStore();
+    const savedConfig = savedStore && typeof savedStore.config === 'object'
+        ? savedStore.config
+        : {};
+    const config = {
+        ...defaults.config,
+        ...savedConfig
+    };
+
+    config.enabled = Boolean(config.enabled);
+    config.groupId = String(config.groupId || defaults.config.groupId || '').trim();
+    config.logChannelId = String(config.logChannelId || defaults.config.logChannelId || '').trim();
+    config.cooldownHours = coerceVrchatAutoInviteNumber(
+        config.cooldownHours,
+        defaults.config.cooldownHours,
+        {
+            min: 0.1,
+            max: 8760,
+            integer: false
+        }
+    );
+    config.delaySeconds = coerceVrchatAutoInviteNumber(
+        config.delaySeconds,
+        defaults.config.delaySeconds,
+        {
+            min: 1,
+            max: 3600
+        }
+    );
+    config.maxPerHour = coerceVrchatAutoInviteNumber(
+        config.maxPerHour,
+        defaults.config.maxPerHour,
+        {
+            min: 0,
+            max: 10000
+        }
+    );
+    config.maxPerDay = coerceVrchatAutoInviteNumber(
+        config.maxPerDay,
+        defaults.config.maxPerDay,
+        {
+            min: 0,
+            max: 100000
+        }
+    );
+    config.maxRetries = coerceVrchatAutoInviteNumber(
+        config.maxRetries,
+        defaults.config.maxRetries,
+        {
+            min: 0,
+            max: 25
+        }
+    );
+
+    const ignoredUsers = savedStore?.ignoredUsers &&
+        typeof savedStore.ignoredUsers === 'object' &&
+        !Array.isArray(savedStore.ignoredUsers)
+        ? savedStore.ignoredUsers
+        : {};
+    const users = savedStore?.users &&
+        typeof savedStore.users === 'object' &&
+        !Array.isArray(savedStore.users)
+        ? savedStore.users
+        : {};
+    const queue = Array.isArray(savedStore?.queue)
+        ? savedStore.queue
+            .filter(entry => extractVrcUserIdFromInput(entry?.userId || entry?.id || ''))
+            .slice(0, VRCHAT_AUTO_INVITE_MAX_QUEUE_SIZE)
+        : [];
+    const history = Array.isArray(savedStore?.history)
+        ? savedStore.history.slice(-VRCHAT_AUTO_INVITE_HISTORY_LIMIT)
+        : [];
+
+    return {
+        version: 1,
+        config,
+        ignoredUsers,
+        users,
+        queue,
+        history
+    };
+
+}
+
+function getVrchatAutoInviteStore() {
+
+    if (!vrchatAutoInviteStore) {
+        vrchatAutoInviteStore = normalizeVrchatAutoInviteStore();
+    }
+
+    return vrchatAutoInviteStore;
+
+}
+
+function loadVrchatAutoInviteStore() {
+
+    vrchatAutoInviteStore = normalizeVrchatAutoInviteStore(
+        readJsonObjectFile(VRCHAT_AUTO_INVITE_STORE_FILE, getDefaultVrchatAutoInviteStore())
+    );
+
+    console.log(
+        `Loaded VRChat auto-invite store with ${Object.keys(vrchatAutoInviteStore.users).length} tracked user(s) ` +
+        `and ${vrchatAutoInviteStore.queue.length} queued invite(s).`
+    );
+
+}
+
+function saveVrchatAutoInviteStore() {
+
+    const store = getVrchatAutoInviteStore();
+
+    store.history = Array.isArray(store.history)
+        ? store.history.slice(-VRCHAT_AUTO_INVITE_HISTORY_LIMIT)
+        : [];
+    store.queue = Array.isArray(store.queue)
+        ? store.queue.slice(0, VRCHAT_AUTO_INVITE_MAX_QUEUE_SIZE)
+        : [];
+
+    writeJsonObjectFile(VRCHAT_AUTO_INVITE_STORE_FILE, store);
+
+}
+
+function getVrchatAutoInviteConfig() {
+    return getVrchatAutoInviteStore().config;
+}
+
+function getVrchatAutoInviteMissingSettings() {
+
+    const config = getVrchatAutoInviteConfig();
+    const missing = [];
+
+    if (!config.groupId) missing.push('VRCHAT_AUTO_INVITE_GROUP_ID');
+    if (!VRCHAT_AUTH_COOKIE) missing.push('VRCHAT_AUTH_COOKIE');
+
+    return missing;
+
+}
+
+function normalizeVrchatAutoInviteUserId(input) {
+    return extractVrcUserIdFromInput(input);
+}
+
+function getVrchatAutoInviteDisplayName(user, fallback = 'Unknown VRChat user') {
+
+    return truncateText(
+        user?.displayName ||
+            user?.username ||
+            user?.name ||
+            fallback,
+        120
+    );
+
+}
+
+function getVrchatAutoInviteUserRecord(userId, displayName = 'Unknown VRChat user') {
+
+    const store = getVrchatAutoInviteStore();
+
+    if (!store.users[userId]) {
+        store.users[userId] = {
+            userId,
+            displayName,
+            firstSeenAt: new Date().toISOString(),
+            lastSeenAt: null,
+            lastInviteAt: null,
+            totalInvites: 0,
+            status: 'new',
+            retryCount: 0,
+            lastFailureReason: null,
+            lastInstanceId: null,
+            acceptedAt: null,
+            acceptedHandledAt: null
+        };
+    }
+
+    if (displayName && displayName !== 'Unknown VRChat user') {
+        store.users[userId].displayName = displayName;
+    }
+
+    return store.users[userId];
+
+}
+
+function isVrchatAutoInviteIgnored(userId) {
+    return Boolean(getVrchatAutoInviteStore().ignoredUsers[userId]);
+}
+
+function removeVrchatAutoInviteFromQueue(userId) {
+
+    const store = getVrchatAutoInviteStore();
+    const before = store.queue.length;
+    store.queue = store.queue.filter(entry => entry.userId !== userId);
+
+    return before - store.queue.length;
+
+}
+
+function hasVrchatAutoInviteQueued(userId) {
+    return getVrchatAutoInviteStore().queue.some(entry => entry.userId === userId);
+}
+
+function getVrchatAutoInviteCooldownRemainingMs(record) {
+
+    const config = getVrchatAutoInviteConfig();
+    const lastInviteAt = Date.parse(record?.lastInviteAt || '');
+
+    if (Number.isNaN(lastInviteAt)) return 0;
+
+    return Math.max(0, lastInviteAt + (config.cooldownHours * 60 * 60 * 1000) - Date.now());
+
+}
+
+function hasVrchatAutoInviteExceededRetries(record) {
+
+    const config = getVrchatAutoInviteConfig();
+
+    return record?.status === 'failed' && Number(record.retryCount || 0) >= config.maxRetries;
+
+}
+
+function createVrchatAutoInviteEventId() {
+
+    return typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : crypto.randomBytes(16).toString('hex');
+
+}
+
+function shouldSendVrchatAutoInviteLog(event, record) {
+
+    if (event.status !== 'skipped') return true;
+
+    const now = Date.now();
+    const key = `${event.status}:${event.reason || ''}:${event.userId}:${event.instanceId || ''}`;
+    const lastLoggedAt = Date.parse(record.lastSkipLoggedAt || '');
+
+    if (
+        record.lastSkipLogKey === key &&
+        !Number.isNaN(lastLoggedAt) &&
+        now - lastLoggedAt < VRCHAT_AUTO_INVITE_SKIP_LOG_COOLDOWN_MS
+    ) {
+        return false;
+    }
+
+    record.lastSkipLogKey = key;
+    record.lastSkipLoggedAt = new Date(now).toISOString();
+    return true;
+
+}
+
+function getVrchatAutoInviteLogColor(status) {
+
+    if (status === 'success' || status === 'accepted') return '#2ECC71';
+    if (status === 'failed') return '#E74C3C';
+    if (status === 'queued') return '#3498DB';
+    if (status === 'skipped') return '#F1C40F';
+    return '#95A5A6';
+
+}
+
+async function getVrchatAutoInviteLogChannel() {
+
+    const channelId = getVrchatAutoInviteConfig().logChannelId || VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID;
+
+    if (!channelId) return null;
+
+    const channel = client.channels.cache.get(channelId) ||
+        await client.channels.fetch(channelId).catch(() => null);
+
+    return channel?.isTextBased?.() && channel.send ? channel : null;
+
+}
+
+async function sendVrchatAutoInviteLog(event) {
+
+    const channel = await getVrchatAutoInviteLogChannel();
+
+    if (!channel) return;
+
+    const embed = new EmbedBuilder()
+        .setColor(getVrchatAutoInviteLogColor(event.status))
+        .setTitle('VRChat Auto Invite')
+        .addFields(
+            {
+                name: 'VRChat Username',
+                value: truncateText(event.displayName || 'Unknown VRChat user', 250),
+                inline: false
+            },
+            {
+                name: 'VRChat User ID',
+                value: `\`${event.userId || 'unknown'}\``,
+                inline: false
+            },
+            {
+                name: 'Instance ID',
+                value: truncateText(event.instanceId || 'unknown', 1000),
+                inline: false
+            },
+            {
+                name: 'Invite Status',
+                value: event.status,
+                inline: true
+            },
+            {
+                name: 'Failure/Skip Reason',
+                value: truncateText(event.reason || 'None', 1000),
+                inline: false
+            },
+            {
+                name: 'Skipped By Cooldown',
+                value: event.skippedForCooldown ? 'yes' : 'no',
+                inline: true
+            },
+            {
+                name: 'Time',
+                value: event.createdAt,
+                inline: false
+            }
+        )
+        .setTimestamp(new Date(event.createdAt));
+
+    await channel.send({
+        embeds: [embed],
+        allowedMentions: {
+            parse: []
+        }
+    }).catch(error => {
+        console.error('Failed to send VRChat auto-invite log:', error);
+    });
+
+}
+
+async function recordVrchatAutoInviteEvent({
+    status,
+    reason,
+    userId,
+    displayName,
+    instanceId = null,
+    worldName = null,
+    skippedForCooldown = false,
+    apiAttempted = false
+}) {
+
+    const store = getVrchatAutoInviteStore();
+    const createdAt = new Date().toISOString();
+    const record = userId
+        ? getVrchatAutoInviteUserRecord(userId, displayName)
+        : null;
+    const event = {
+        id: createVrchatAutoInviteEventId(),
+        status,
+        reason: reason || null,
+        userId: userId || null,
+        displayName: displayName || record?.displayName || 'Unknown VRChat user',
+        instanceId,
+        worldName,
+        skippedForCooldown,
+        apiAttempted,
+        createdAt
+    };
+
+    if (record) {
+        record.status = status === 'success' ? 'sent' : status;
+        record.lastStatus = status;
+        record.lastReason = reason || null;
+        record.lastInstanceId = instanceId || record.lastInstanceId || null;
+        record.updatedAt = createdAt;
+
+        if (status === 'failed') {
+            record.lastFailureReason = reason || 'Unknown failure';
+        }
+    }
+
+    const shouldLog = record ? shouldSendVrchatAutoInviteLog(event, record) : true;
+
+    store.history.push(event);
+    store.history = store.history.slice(-VRCHAT_AUTO_INVITE_HISTORY_LIMIT);
+    saveVrchatAutoInviteStore();
+
+    if (shouldLog) {
+        await sendVrchatAutoInviteLog(event);
+    }
+
+}
+
+function getVrchatAutoInviteInstanceLocation(instance) {
+
+    if (typeof instance?.location === 'string' && instance.location.includes(':')) {
+        return instance.location;
+    }
+
+    const worldId = getVrchatInstanceWorldId(instance);
+    const instanceId = getVrchatInstanceId(instance) || instance?.id;
+
+    return worldId && instanceId ? `${worldId}:${instanceId}` : '';
+
+}
+
+function getVrchatAutoInviteInstanceLabel(instance) {
+
+    return getVrchatAutoInviteInstanceLocation(instance) ||
+        instance?.instanceId ||
+        instance?.id ||
+        'unknown';
+
+}
+
+function getVrchatAutoInviteInstanceUsers(instance) {
+
+    if (Array.isArray(instance?.users)) return instance.users;
+    if (Array.isArray(instance?.players)) return instance.players;
+    if (Array.isArray(instance?.occupants)) return instance.occupants;
+
+    return [];
+
+}
+
+function getVrchatAutoInviteInstanceUserCount(instance) {
+
+    return Number.parseInt(
+        instance?.memberCount ??
+            instance?.userCount ??
+            instance?.n_users ??
+            getVrchatAutoInviteInstanceUsers(instance).length,
+        10
+    ) || 0;
+
+}
+
+function getVrchatAutoInviteInstanceAgeGate(instance) {
+
+    if (typeof instance?.ageGate === 'boolean') return instance.ageGate;
+    if (typeof instance?.ageGated === 'boolean') return instance.ageGated;
+    if (typeof instance?.isAgeGated === 'boolean') return instance.isAgeGated;
+
+    return null;
+
+}
+
+function getVrchatAutoInviteAgeGateSkipReason(candidate) {
+
+    return candidate?.ageGate === false
+        ? 'Instance is not age gated.'
+        : 'Could not verify that the instance is age gated.';
+
+}
+
+async function fetchVrchatAutoInviteGroupInstances(groupId = getVrchatAutoInviteConfig().groupId) {
+
+    const payload = await fetchVrchatApiJson(`/groups/${encodeURIComponent(groupId)}/instances`);
+
+    if (Array.isArray(payload)) return payload;
+    if (Array.isArray(payload?.instances)) return payload.instances;
+
+    return [];
+
+}
+
+async function fetchVrchatAutoInviteInstanceDetail(instance) {
+
+    const location = getVrchatAutoInviteInstanceLocation(instance);
+
+    if (!location.includes(':')) return null;
+
+    const [worldId, ...instanceParts] = location.split(':');
+    const instanceId = instanceParts.join(':');
+
+    if (!worldId || !instanceId) return null;
+
+    return await fetchVrchatApiJson(
+        `/instances/${encodeURIComponent(worldId)}:${encodeURIComponent(instanceId)}`
+    );
+
+}
+
+async function collectVrchatAutoInviteCandidates() {
+
+    const instances = await fetchVrchatAutoInviteGroupInstances();
+    const candidates = new Map();
+
+    for (const instance of instances) {
+
+        let detailedInstance = instance;
+        let users = getVrchatAutoInviteInstanceUsers(detailedInstance);
+        let ageGate = getVrchatAutoInviteInstanceAgeGate(detailedInstance);
+
+        if (
+            (users.length === 0 && getVrchatAutoInviteInstanceUserCount(instance) > 0) ||
+            ageGate !== true
+        ) {
+            const previousInstance = detailedInstance;
+            const previousUsers = users;
+            const fetchedDetail = await fetchVrchatAutoInviteInstanceDetail(instance).catch(error => {
+                console.warn('Failed to fetch VRChat instance details for auto-invite:', error.message);
+                return null;
+            });
+            detailedInstance = fetchedDetail || previousInstance || instance;
+            users = getVrchatAutoInviteInstanceUsers(detailedInstance);
+            if (users.length === 0 && previousUsers.length > 0) {
+                users = previousUsers;
+            }
+            ageGate = getVrchatAutoInviteInstanceAgeGate(detailedInstance);
+        }
+
+        const instanceId = getVrchatAutoInviteInstanceLabel(detailedInstance || instance);
+        const worldName = detailedInstance?.world?.name || instance?.world?.name || null;
+
+        for (const user of users) {
+
+            const userId = normalizeVrchatAutoInviteUserId(user?.id || user?.userId || '');
+
+            if (!userId) continue;
+
+            candidates.set(userId, {
+                userId,
+                displayName: getVrchatAutoInviteDisplayName(user, userId),
+                instanceId,
+                worldName,
+                ageGate,
+                ageGateVerified: ageGate === true,
+                seenAt: new Date().toISOString()
+            });
+
+        }
+
+    }
+
+    return [...candidates.values()];
+
+}
+
+async function fetchVrchatGroupMemberByUserId(groupId, userId) {
+
+    try {
+        return await fetchVrchatApiJson(
+            `/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`
+        );
+    } catch (error) {
+
+        if (error?.statusCode === 404) return null;
+
+        throw error;
+
+    }
+
+}
+
+function isVrchatAutoInviteActiveMember(member) {
+
+    if (!member) return false;
+
+    const status = String(member.membershipStatus || member.status || 'member').toLowerCase();
+
+    return status === 'member' || status === 'active' || status === 'visible';
+
+}
+
+async function isVrchatAutoInviteGroupMember(userId, {
+    force = false,
+    displayName = null
+} = {}) {
+
+    const config = getVrchatAutoInviteConfig();
+    const cached = vrchatAutoInviteMemberCache.get(userId);
+    const now = Date.now();
+
+    if (!force && cached && cached.groupId === config.groupId && now - cached.checkedAt < VRCHAT_AUTO_INVITE_MEMBER_CACHE_MS) {
+        return cached.isMember;
+    }
+
+    const member = await fetchVrchatGroupMemberByUserId(config.groupId, userId);
+    const isMember = isVrchatAutoInviteActiveMember(member);
+
+    vrchatAutoInviteMemberCache.set(userId, {
+        groupId: config.groupId,
+        checkedAt: now,
+        isMember
+    });
+
+    const trackedRecord = getVrchatAutoInviteStore().users[userId];
+
+    if (isMember && (trackedRecord?.lastInviteAt || Number(trackedRecord?.totalInvites || 0) > 0)) {
+        await markVrchatAutoInviteAccepted(userId, displayName || member?.user?.displayName || member?.displayName || userId);
+    }
+
+    return isMember;
+
+}
+
+async function fetchVrchatGroupInvitesPage(groupId, offset = 0, pageSize = 100) {
+
+    const invites = await fetchVrchatApiJson(`/groups/${encodeURIComponent(groupId)}/invites`, {
+        n: pageSize,
+        offset
+    });
+
+    return Array.isArray(invites) ? invites : [];
+
+}
+
+async function fetchAllVrchatGroupInvites(groupId) {
+
+    const invites = [];
+    const pageSize = 100;
+    let offset = 0;
+
+    while (true) {
+
+        const page = await fetchVrchatGroupInvitesPage(groupId, offset, pageSize);
+        invites.push(...page);
+
+        if (page.length < pageSize) break;
+
+        offset += pageSize;
+
+    }
+
+    return invites;
+
+}
+
+function getVrchatAutoInviteInviteUserId(invite) {
+    return normalizeVrchatAutoInviteUserId(invite?.userId || invite?.user?.id || '');
+}
+
+async function refreshVrchatAutoInvitePendingCache(force = false) {
+
+    const config = getVrchatAutoInviteConfig();
+    const now = Date.now();
+
+    if (
+        !force &&
+        vrchatAutoInvitePendingCache.groupId === config.groupId &&
+        now - vrchatAutoInvitePendingCache.refreshedAt < VRCHAT_AUTO_INVITE_PENDING_CACHE_MS
+    ) {
+        return vrchatAutoInvitePendingCache.userIds;
+    }
+
+    const invites = await fetchAllVrchatGroupInvites(config.groupId);
+    const userIds = new Set(invites.map(getVrchatAutoInviteInviteUserId).filter(Boolean));
+
+    vrchatAutoInvitePendingCache = {
+        groupId: config.groupId,
+        refreshedAt: now,
+        userIds
+    };
+
+    return userIds;
+
+}
+
+async function hasVrchatAutoInvitePendingInvite(userId, force = false) {
+
+    const pendingUserIds = await refreshVrchatAutoInvitePendingCache(force);
+
+    return pendingUserIds.has(userId);
+
+}
+
+async function createVrchatGroupInvite(groupId, userId) {
+
+    return await requestVrchatApiJson('POST', `/groups/${encodeURIComponent(groupId)}/invites`, {
+        body: {
+            userId,
+            confirmOverrideBlock: true
+        }
+    });
+
+}
+
+async function deleteVrchatGroupInvite(groupId, userId) {
+
+    return await requestVrchatApiJson(
+        'DELETE',
+        `/groups/${encodeURIComponent(groupId)}/invites/${encodeURIComponent(userId)}`
+    );
+
+}
+
+function getVrchatAutoInviteApiAttemptCount(windowMs) {
+
+    const since = Date.now() - windowMs;
+
+    return getVrchatAutoInviteStore().history.filter(event =>
+        event.apiAttempted &&
+        Date.parse(event.createdAt || '') >= since
+    ).length;
+
+}
+
+function getVrchatAutoInviteLimitBlock() {
+
+    const config = getVrchatAutoInviteConfig();
+    const now = Date.now();
+    const hourMs = 60 * 60 * 1000;
+    const dayMs = 24 * 60 * 60 * 1000;
+    const apiEvents = getVrchatAutoInviteStore().history
+        .filter(event => event.apiAttempted)
+        .map(event => Date.parse(event.createdAt || ''))
+        .filter(timestamp => !Number.isNaN(timestamp));
+
+    const hourEvents = apiEvents
+        .filter(timestamp => timestamp >= now - hourMs)
+        .sort((a, b) => a - b);
+    const dayEvents = apiEvents
+        .filter(timestamp => timestamp >= now - dayMs)
+        .sort((a, b) => a - b);
+
+    if (config.maxPerHour <= 0) {
+        return {
+            reason: 'Hourly limit is set to 0.',
+            retryAfterMs: hourMs
+        };
+    }
+
+    if (config.maxPerDay <= 0) {
+        return {
+            reason: 'Daily limit is set to 0.',
+            retryAfterMs: dayMs
+        };
+    }
+
+    if (hourEvents.length >= config.maxPerHour) {
+        return {
+            reason: `Hourly limit reached (${config.maxPerHour}).`,
+            retryAfterMs: Math.max(1000, hourEvents[0] + hourMs - now + 1000)
+        };
+    }
+
+    if (dayEvents.length >= config.maxPerDay) {
+        return {
+            reason: `Daily limit reached (${config.maxPerDay}).`,
+            retryAfterMs: Math.max(1000, dayEvents[0] + dayMs - now + 1000)
+        };
+    }
+
+    return null;
+
+}
+
+function enqueueVrchatAutoInvite(candidate, {
+    manual = false,
+    force = false,
+    front = false
+} = {}) {
+
+    const store = getVrchatAutoInviteStore();
+
+    removeVrchatAutoInviteFromQueue(candidate.userId);
+
+    if (store.queue.length >= VRCHAT_AUTO_INVITE_MAX_QUEUE_SIZE) {
+        return false;
+    }
+
+    const entry = {
+        id: createVrchatAutoInviteEventId(),
+        userId: candidate.userId,
+        displayName: candidate.displayName || candidate.userId,
+        instanceId: candidate.instanceId || 'manual',
+        worldName: candidate.worldName || null,
+        ageGate: candidate.ageGate === true
+            ? true
+            : candidate.ageGate === false
+                ? false
+                : null,
+        ageGateVerified: candidate.ageGateVerified === true,
+        queuedAt: new Date().toISOString(),
+        retryAfterAt: null,
+        attempts: 0,
+        manual,
+        force
+    };
+
+    if (front) {
+        store.queue.unshift(entry);
+    } else {
+        store.queue.push(entry);
+    }
+
+    saveVrchatAutoInviteStore();
+    return true;
+
+}
+
+async function evaluateVrchatAutoInviteCandidate(candidate, {
+    manual = false,
+    force = false,
+    front = false
+} = {}) {
+
+    const record = getVrchatAutoInviteUserRecord(candidate.userId, candidate.displayName);
+    const nowIso = new Date().toISOString();
+
+    record.lastSeenAt = candidate.seenAt || nowIso;
+    record.lastInstanceId = candidate.instanceId || record.lastInstanceId || null;
+    record.lastAgeGate = candidate.ageGate === true
+        ? true
+        : candidate.ageGate === false
+            ? false
+            : null;
+    record.lastAgeGateCheckedAt = nowIso;
+    record.updatedAt = nowIso;
+
+    if (candidate.ageGateVerified !== true) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: getVrchatAutoInviteAgeGateSkipReason(candidate),
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return 'skipped';
+    }
+
+    if (isVrchatAutoInviteIgnored(candidate.userId)) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: 'Ignored user.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return 'skipped';
+    }
+
+    if (!force && hasVrchatAutoInviteQueued(candidate.userId)) {
+        return 'already-queued';
+    }
+
+    if (!force && await isVrchatAutoInviteGroupMember(candidate.userId, {
+        displayName: candidate.displayName
+    })) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: 'Existing group member.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return 'skipped';
+    }
+
+    if (!force && await hasVrchatAutoInvitePendingInvite(candidate.userId)) {
+        record.status = 'pending';
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: 'Pending invite already exists.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return 'skipped';
+    }
+
+    const cooldownRemainingMs = force ? 0 : getVrchatAutoInviteCooldownRemainingMs(record);
+
+    if (cooldownRemainingMs > 0) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: `Cooldown active for ${formatDurationFromMs(cooldownRemainingMs)}.`,
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId,
+            skippedForCooldown: true
+        });
+        return 'skipped';
+    }
+
+    if (!force && hasVrchatAutoInviteExceededRetries(record)) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: `Retry limit reached (${getVrchatAutoInviteConfig().maxRetries}).`,
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return 'skipped';
+    }
+
+    if (!enqueueVrchatAutoInvite(candidate, {
+        manual,
+        force,
+        front
+    })) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: 'Invite queue is full.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return 'skipped';
+    }
+
+    record.status = 'queued';
+    record.updatedAt = new Date().toISOString();
+    saveVrchatAutoInviteStore();
+
+    await recordVrchatAutoInviteEvent({
+        status: 'queued',
+        reason: manual ? 'Queued manually.' : 'Queued from active group instance scan.',
+        userId: candidate.userId,
+        displayName: candidate.displayName,
+        instanceId: candidate.instanceId
+    });
+
+    scheduleVrchatAutoInviteQueue(0);
+    return 'queued';
+
+}
+
+function classifyVrchatAutoInviteError(error) {
+
+    const message = String(error?.message || '').toLowerCase();
+
+    if (/already.*member|is already a member/.test(message)) return 'member';
+    if (/already.*invite|already invited|invite.*exists/.test(message)) return 'pending';
+    if (isVrchatRateLimitError(error)) return 'rate-limit';
+    if ([408, 425, 429, 500, 502, 503, 504].includes(Number(error?.statusCode))) return 'temporary';
+    if (/timeout|temporar|try again|network/.test(message)) return 'temporary';
+
+    return 'permanent';
+
+}
+
+async function processVrchatAutoInviteQueueEntry(entry) {
+
+    const config = getVrchatAutoInviteConfig();
+    const candidate = {
+        userId: entry.userId,
+        displayName: entry.displayName || entry.userId,
+        instanceId: entry.instanceId || 'manual',
+        worldName: entry.worldName || null,
+        ageGate: entry.ageGate === true
+            ? true
+            : entry.ageGate === false
+                ? false
+                : null,
+        ageGateVerified: entry.ageGateVerified === true
+    };
+    const record = getVrchatAutoInviteUserRecord(candidate.userId, candidate.displayName);
+
+    if (candidate.ageGateVerified !== true) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: getVrchatAutoInviteAgeGateSkipReason(candidate),
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return;
+    }
+
+    if (isVrchatAutoInviteIgnored(candidate.userId)) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: 'Ignored user.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return;
+    }
+
+    if (!entry.force && await isVrchatAutoInviteGroupMember(candidate.userId, {
+        displayName: candidate.displayName
+    })) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: 'Existing group member.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return;
+    }
+
+    const hasPendingInvite = await hasVrchatAutoInvitePendingInvite(candidate.userId, entry.force);
+
+    if (hasPendingInvite && entry.force) {
+        await deleteVrchatGroupInvite(config.groupId, candidate.userId).catch(error => {
+            console.warn('Failed to delete existing VRChat group invite before resend:', error.message);
+        });
+        await refreshVrchatAutoInvitePendingCache(true).catch(() => null);
+    } else if (hasPendingInvite) {
+        record.status = 'pending';
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: 'Pending invite already exists.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId
+        });
+        return;
+    }
+
+    const cooldownRemainingMs = entry.force ? 0 : getVrchatAutoInviteCooldownRemainingMs(record);
+
+    if (cooldownRemainingMs > 0) {
+        await recordVrchatAutoInviteEvent({
+            status: 'skipped',
+            reason: `Cooldown active for ${formatDurationFromMs(cooldownRemainingMs)}.`,
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId,
+            skippedForCooldown: true
+        });
+        return;
+    }
+
+    try {
+
+        await createVrchatGroupInvite(config.groupId, candidate.userId);
+
+        const sentAt = new Date().toISOString();
+        vrchatAutoInviteLastInviteSentAt = Date.now();
+        record.lastInviteAt = sentAt;
+        record.totalInvites = Number(record.totalInvites || 0) + 1;
+        record.retryCount = 0;
+        record.status = 'sent';
+        record.lastFailureReason = null;
+        record.updatedAt = sentAt;
+        vrchatAutoInvitePendingCache.userIds.add(candidate.userId);
+        saveVrchatAutoInviteStore();
+
+        await recordVrchatAutoInviteEvent({
+            status: 'success',
+            reason: 'Invite sent.',
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId,
+            apiAttempted: true
+        });
+
+    } catch (error) {
+
+        const errorType = classifyVrchatAutoInviteError(error);
+        const apiAttempted = !isVrchatRateLimitError(error) || error.source !== 'local-backoff';
+        const reason = truncateText(error.message || 'Unknown invite failure.', 900);
+
+        if (apiAttempted) {
+            vrchatAutoInviteLastInviteSentAt = Date.now();
+        }
+
+        if (errorType === 'member') {
+            if (record.lastInviteAt || Number(record.totalInvites || 0) > 0) {
+                await markVrchatAutoInviteAccepted(candidate.userId, candidate.displayName);
+            } else {
+                record.status = 'member';
+                record.updatedAt = new Date().toISOString();
+                saveVrchatAutoInviteStore();
+            }
+            await recordVrchatAutoInviteEvent({
+                status: 'skipped',
+                reason: 'VRChat says the user is already a group member.',
+                userId: candidate.userId,
+                displayName: candidate.displayName,
+                instanceId: candidate.instanceId,
+                apiAttempted
+            });
+            return;
+        }
+
+        if (errorType === 'pending') {
+            record.status = 'pending';
+            vrchatAutoInvitePendingCache.userIds.add(candidate.userId);
+            await recordVrchatAutoInviteEvent({
+                status: 'skipped',
+                reason: 'VRChat says a pending invite already exists.',
+                userId: candidate.userId,
+                displayName: candidate.displayName,
+                instanceId: candidate.instanceId,
+                apiAttempted
+            });
+            return;
+        }
+
+        record.retryCount = Number(record.retryCount || 0) + 1;
+        record.status = 'failed';
+        record.lastFailureReason = reason;
+        record.updatedAt = new Date().toISOString();
+
+        const retryAfterMs = isVrchatRateLimitError(error)
+            ? error.retryAfterMs
+            : VRCHAT_AUTO_INVITE_RETRY_DELAY_MS;
+        const shouldRetry = (
+            errorType === 'temporary' ||
+            errorType === 'rate-limit'
+        ) && record.retryCount <= config.maxRetries;
+
+        await recordVrchatAutoInviteEvent({
+            status: 'failed',
+            reason: shouldRetry
+                ? `${reason} Retrying after ${formatDurationFromMs(retryAfterMs)}.`
+                : reason,
+            userId: candidate.userId,
+            displayName: candidate.displayName,
+            instanceId: candidate.instanceId,
+            apiAttempted
+        });
+
+        if (shouldRetry) {
+            entry.attempts = Number(entry.attempts || 0) + 1;
+            entry.retryAfterAt = new Date(Date.now() + retryAfterMs).toISOString();
+            getVrchatAutoInviteStore().queue.unshift(entry);
+            saveVrchatAutoInviteStore();
+            scheduleVrchatAutoInviteQueue(retryAfterMs);
+        }
+
+    }
+
+}
+
+function scheduleVrchatAutoInviteQueue(delayMs = 0) {
+
+    if (vrchatAutoInviteQueueTimer) {
+        clearTimeout(vrchatAutoInviteQueueTimer);
+    }
+
+    vrchatAutoInviteQueueTimer = setTimeout(() => {
+        vrchatAutoInviteQueueTimer = null;
+        void processVrchatAutoInviteQueue().catch(error => {
+            console.error('VRChat auto-invite queue worker failed:', error);
+        });
+    }, Math.max(0, delayMs));
+
+    if (typeof vrchatAutoInviteQueueTimer.unref === 'function') {
+        vrchatAutoInviteQueueTimer.unref();
+    }
+
+}
+
+async function processVrchatAutoInviteQueue() {
+
+    const store = getVrchatAutoInviteStore();
+    const config = getVrchatAutoInviteConfig();
+
+    if (vrchatAutoInviteQueueRunning) return;
+    if (!config.enabled) return;
+    if (!store.queue.length) return;
+
+    const missingSettings = getVrchatAutoInviteMissingSettings();
+
+    if (missingSettings.length) {
+        console.warn(`VRChat auto-invite queue paused. Missing: ${missingSettings.join(', ')}`);
+        return;
+    }
+
+    vrchatAutoInviteQueueRunning = true;
+
+    try {
+
+        while (config.enabled && store.queue.length > 0) {
+
+            const limitBlock = getVrchatAutoInviteLimitBlock();
+
+            if (limitBlock) {
+                scheduleVrchatAutoInviteQueue(limitBlock.retryAfterMs);
+                break;
+            }
+
+            const waitForSendSpacingMs = Math.max(
+                0,
+                vrchatAutoInviteLastInviteSentAt + (config.delaySeconds * 1000) - Date.now()
+            );
+
+            if (waitForSendSpacingMs > 0) {
+                scheduleVrchatAutoInviteQueue(waitForSendSpacingMs);
+                break;
+            }
+
+            const entry = store.queue[0];
+            const retryAt = Date.parse(entry.retryAfterAt || '');
+
+            if (!Number.isNaN(retryAt) && retryAt > Date.now()) {
+                scheduleVrchatAutoInviteQueue(retryAt - Date.now());
+                break;
+            }
+
+            store.queue.shift();
+            saveVrchatAutoInviteStore();
+            await processVrchatAutoInviteQueueEntry(entry);
+        }
+
+    } finally {
+
+        vrchatAutoInviteQueueRunning = false;
+
+    }
+
+}
+
+async function markVrchatAutoInviteAccepted(userId, displayName = 'Unknown VRChat user') {
+
+    const record = getVrchatAutoInviteUserRecord(userId, displayName);
+    const wasAccepted = Boolean(record.acceptedAt);
+
+    if (!record.acceptedAt) {
+        record.acceptedAt = new Date().toISOString();
+    }
+
+    record.status = 'accepted';
+    record.updatedAt = new Date().toISOString();
+    saveVrchatAutoInviteStore();
+
+    if (!wasAccepted) {
+        await recordVrchatAutoInviteEvent({
+            status: 'accepted',
+            reason: 'User is now a group member.',
+            userId,
+            displayName,
+            instanceId: record.lastInstanceId || 'unknown'
+        });
+    }
+
+    await handleVrchatAutoInviteAcceptance(record);
+
+}
+
+async function handleVrchatAutoInviteAcceptance(record) {
+
+    if (!record?.userId || record.acceptedHandledAt) return;
+
+    record.acceptedHandledAt = new Date().toISOString();
+    saveVrchatAutoInviteStore();
+
+    if (VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID) {
+        const channel = client.channels.cache.get(VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID) ||
+            await client.channels.fetch(VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID).catch(() => null);
+
+        if (channel?.isTextBased?.() && channel.send) {
+            await channel.send({
+                content: `Welcome **${truncateText(record.displayName || record.userId, 80)}** to the VRChat group!`,
+                allowedMentions: {
+                    parse: []
+                }
+            }).catch(error => {
+                console.error('Failed to send VRChat auto-invite welcome message:', error);
+            });
+        }
+    }
+
+    if (!VRCHAT_AUTO_INVITE_JOIN_ROLE_ID) return;
+
+    for (const guild of client.guilds.cache.values()) {
+
+        const role = guild.roles.cache.get(VRCHAT_AUTO_INVITE_JOIN_ROLE_ID) ||
+            await guild.roles.fetch(VRCHAT_AUTO_INVITE_JOIN_ROLE_ID).catch(() => null);
+
+        if (!role) continue;
+
+        const linkedAccounts = getVrcVerificationRecordsForVrchatUser(guild.id, record.userId);
+
+        for (const linkedAccount of linkedAccounts) {
+
+            const member = guild.members.cache.get(linkedAccount.discordUserId) ||
+                await guild.members.fetch(linkedAccount.discordUserId).catch(() => null);
+
+            if (!member || member.roles.cache.has(role.id)) continue;
+
+            await member.roles.add(role, 'VRChat auto-invite accepted and account is linked.').catch(error => {
+                console.error('Failed to assign VRChat auto-invite join role:', error);
+            });
+
+        }
+
+    }
+
+}
+
+async function runVrchatAutoInviteScan(trigger = 'scheduled') {
+
+    const config = getVrchatAutoInviteConfig();
+
+    if (vrchatAutoInviteScanRunning) {
+        return {
+            skipped: true,
+            reason: 'Scan already running.'
+        };
+    }
+
+    if (!config.enabled) {
+        return {
+            skipped: true,
+            reason: 'Auto-invite is off.'
+        };
+    }
+
+    const missingSettings = getVrchatAutoInviteMissingSettings();
+
+    if (missingSettings.length) {
+        console.warn(`VRChat auto-invite scan skipped. Missing: ${missingSettings.join(', ')}`);
+        return {
+            skipped: true,
+            reason: `Missing: ${missingSettings.join(', ')}`
+        };
+    }
+
+    vrchatAutoInviteScanRunning = true;
+
+    try {
+
+        const candidates = await collectVrchatAutoInviteCandidates();
+        const result = {
+            trigger,
+            candidates: candidates.length,
+            queued: 0,
+            skipped: 0
+        };
+
+        if (candidates.length > 0) {
+            await refreshVrchatAutoInvitePendingCache(false);
+        }
+
+        for (const candidate of candidates) {
+
+            const outcome = await evaluateVrchatAutoInviteCandidate(candidate);
+
+            if (outcome === 'queued') result.queued++;
+            if (outcome === 'skipped') result.skipped++;
+        }
+
+        if (result.queued > 0) {
+            scheduleVrchatAutoInviteQueue(0);
+        }
+
+        return result;
+
+    } catch (error) {
+
+        if (isVrchatRateLimitError(error)) {
+            console.warn('VRChat auto-invite scan paused by rate limit:', error.message);
+        } else {
+            console.error('VRChat auto-invite scan failed:', error);
+        }
+
+        return {
+            skipped: true,
+            reason: error.message
+        };
+
+    } finally {
+
+        vrchatAutoInviteScanRunning = false;
+
+    }
+
+}
+
+function startVrchatAutoInviteWorker() {
+
+    if (vrchatAutoInviteWorkerStarted) return;
+
+    vrchatAutoInviteWorkerStarted = true;
+
+    if (vrchatAutoInviteScanInterval) {
+        clearInterval(vrchatAutoInviteScanInterval);
+    }
+
+    vrchatAutoInviteScanInterval = setInterval(() => {
+        void runVrchatAutoInviteScan('scheduled').catch(error => {
+            console.error('Scheduled VRChat auto-invite scan failed:', error);
+        });
+    }, VRCHAT_AUTO_INVITE_POLL_INTERVAL_MS);
+
+    if (getVrchatAutoInviteConfig().enabled) {
+        setTimeout(() => {
+            void runVrchatAutoInviteScan('startup').catch(error => {
+                console.error('Startup VRChat auto-invite scan failed:', error);
+            });
+            scheduleVrchatAutoInviteQueue(0);
+        }, 30 * 1000);
+    }
+
+    console.log(
+        `VRChat auto-invite worker loaded for ${getVrchatAutoInviteConfig().groupId}; ` +
+        `enabled=${getVrchatAutoInviteConfig().enabled}.`
+    );
+
+}
+
+async function syncVrchatAutoInviteAcceptedStats(limit = 25) {
+
+    const records = Object.values(getVrchatAutoInviteStore().users)
+        .filter(record =>
+            record?.userId &&
+            record.lastInviteAt &&
+            !record.acceptedAt &&
+            !isVrchatAutoInviteIgnored(record.userId)
+        )
+        .sort((a, b) => Date.parse(b.lastInviteAt || '') - Date.parse(a.lastInviteAt || ''))
+        .slice(0, limit);
+
+    for (const record of records) {
+        await isVrchatAutoInviteGroupMember(record.userId, {
+            force: true,
+            displayName: record.displayName
+        }).catch(error => {
+            console.warn('Failed to refresh VRChat auto-invite accepted status:', error.message);
+        });
+    }
+
+}
+
+function getVrchatAutoInviteStatsSnapshot() {
+
+    const store = getVrchatAutoInviteStore();
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const todayStartMs = dayStart.getTime();
+    const sentToday = store.history.filter(event =>
+        event.status === 'success' &&
+        Date.parse(event.createdAt || '') >= todayStartMs
+    ).length;
+    const failedToday = store.history.filter(event =>
+        event.status === 'failed' &&
+        Date.parse(event.createdAt || '') >= todayStartMs
+    ).length;
+    const accepted = Object.values(store.users).filter(record => record.acceptedAt).length;
+    const pendingFromStore = Object.values(store.users).filter(record => record.status === 'pending').length;
+    const pendingFromCache = vrchatAutoInvitePendingCache.userIds.size || pendingFromStore;
+
+    return {
+        sentToday,
+        accepted,
+        pending: pendingFromCache,
+        failedToday,
+        queueSize: store.queue.length,
+        attemptedLastHour: getVrchatAutoInviteApiAttemptCount(60 * 60 * 1000),
+        attemptedLastDay: getVrchatAutoInviteApiAttemptCount(24 * 60 * 60 * 1000)
+    };
+
+}
+
+function getVrchatAutoInviteStatusText() {
+
+    const config = getVrchatAutoInviteConfig();
+    const missingSettings = getVrchatAutoInviteMissingSettings();
+    const stats = getVrchatAutoInviteStatsSnapshot();
+    const limitBlock = getVrchatAutoInviteLimitBlock();
+
+    return [
+        `Auto-invite: ${config.enabled ? 'on' : 'off'}.`,
+        `Group ID: ${config.groupId || 'not configured'}.`,
+        `VRChat auth: ${VRCHAT_AUTH_COOKIE ? 'cookie configured' : 'missing cookie'}.`,
+        missingSettings.length ? `Missing: ${missingSettings.join(', ')}.` : null,
+        `Scan running: ${vrchatAutoInviteScanRunning ? 'yes' : 'no'}.`,
+        `Queue running: ${vrchatAutoInviteQueueRunning ? 'yes' : 'no'}.`,
+        `Queue size: ${stats.queueSize}.`,
+        `Cooldown: ${config.cooldownHours} hour(s).`,
+        `Delay: ${config.delaySeconds} second(s) between invite attempts.`,
+        `Limits: ${stats.attemptedLastHour}/${config.maxPerHour} this hour, ${stats.attemptedLastDay}/${config.maxPerDay} rolling 24h.`,
+        limitBlock ? `Limit pause: ${limitBlock.reason}` : 'Limit pause: none.',
+        vrchatApiBackoffUntil > Date.now()
+            ? `VRChat API backoff: active for about ${Math.max(1, Math.ceil((vrchatApiBackoffUntil - Date.now()) / 60000))} more minute(s).`
+            : 'VRChat API backoff: inactive.'
+    ].filter(Boolean).join('\n');
+
+}
+
+function getVrchatAutoInviteUsage() {
+
+    return [
+        'Auto-invite usage:',
+        '`!autoinvite on`',
+        '`!autoinvite off`',
+        '`!autoinvite status`',
+        '`!autoinvite cooldown <hours>`',
+        '`!autoinvite delay <seconds>`',
+        '`!autoinvite maxhour <number>`',
+        '`!autoinvite maxday <number>`',
+        '`!autoinvite ignore <vrchat user id>`',
+        '`!autoinvite unignore <vrchat user id>`',
+        '`!autoinvite ignorelist`',
+        '`!autoinvite resend <vrchat user id>`',
+        '`!autoinvite reset <vrchat user id>`',
+        '`!autoinvite stats`',
+        '`!autoinvite queue`',
+        '`!autoinvite clearqueue`'
+    ].join('\n');
+
+}
+
+function getVrchatAutoInviteQueueText() {
+
+    const queue = getVrchatAutoInviteStore().queue;
+
+    if (!queue.length) return 'The auto-invite queue is empty.';
+
+    const lines = queue.slice(0, 10).map((entry, index) =>
+        `${index + 1}. ${entry.displayName || entry.userId} - \`${entry.userId}\` - ${entry.instanceId || 'unknown'}`
+    );
+
+    if (queue.length > lines.length) {
+        lines.push(`...and ${queue.length - lines.length} more queued invite(s).`);
+    }
+
+    return lines.join('\n');
+
+}
+
+async function handleVrchatAutoInviteCommand(message, args) {
+
+    if (!hasSafetyCommandAccess(message.member)) {
+        return message.reply('No permission.');
+    }
+
+    const subcommand = (args.shift() || 'status').toLowerCase();
+    const config = getVrchatAutoInviteConfig();
+
+    if (subcommand === 'help') {
+        return message.reply(getVrchatAutoInviteUsage());
+    }
+
+    if (subcommand === 'on') {
+
+        const missingSettings = getVrchatAutoInviteMissingSettings();
+
+        if (missingSettings.length) {
+            return message.reply(`Auto-invite cannot be enabled yet. Missing: ${missingSettings.join(', ')}.`);
+        }
+
+        config.enabled = true;
+        saveVrchatAutoInviteStore();
+        startVrchatAutoInviteWorker();
+        void runVrchatAutoInviteScan('manual-on').catch(error => {
+            console.error('Manual VRChat auto-invite scan failed:', error);
+        });
+        scheduleVrchatAutoInviteQueue(0);
+
+        return message.reply('VRChat auto-invite is now on.');
+
+    }
+
+    if (subcommand === 'off') {
+        config.enabled = false;
+        saveVrchatAutoInviteStore();
+        return message.reply('VRChat auto-invite is now off. Existing queue entries are kept unless you run `!autoinvite clearqueue`.');
+    }
+
+    if (subcommand === 'status') {
+        return message.channel.send({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(config.enabled ? '#2ECC71' : '#95A5A6')
+                    .setTitle('VRChat Auto Invite Status')
+                    .setDescription(getVrchatAutoInviteStatusText())
+                    .setTimestamp()
+            ]
+        });
+    }
+
+    if (subcommand === 'cooldown') {
+        const hours = Number.parseFloat(args[0]);
+
+        if (!Number.isFinite(hours) || hours <= 0) {
+            return message.reply('Usage: `!autoinvite cooldown <hours>`');
+        }
+
+        config.cooldownHours = Math.max(0.1, Math.min(8760, hours));
+        saveVrchatAutoInviteStore();
+        return message.reply(`Auto-invite cooldown is now ${config.cooldownHours} hour(s).`);
+    }
+
+    if (subcommand === 'delay') {
+        const seconds = Number.parseInt(args[0], 10);
+
+        if (!Number.isFinite(seconds) || seconds < 1) {
+            return message.reply('Usage: `!autoinvite delay <seconds>`');
+        }
+
+        config.delaySeconds = Math.max(1, Math.min(3600, seconds));
+        saveVrchatAutoInviteStore();
+        scheduleVrchatAutoInviteQueue(0);
+        return message.reply(`Auto-invite send delay is now ${config.delaySeconds} second(s).`);
+    }
+
+    if (subcommand === 'maxhour' || subcommand === 'maxperhour') {
+        const maxPerHour = Number.parseInt(args[0], 10);
+
+        if (!Number.isFinite(maxPerHour) || maxPerHour < 0) {
+            return message.reply('Usage: `!autoinvite maxhour <number>`');
+        }
+
+        config.maxPerHour = Math.min(10000, maxPerHour);
+        saveVrchatAutoInviteStore();
+        scheduleVrchatAutoInviteQueue(0);
+        return message.reply(`Auto-invite hourly limit is now ${config.maxPerHour}.`);
+    }
+
+    if (subcommand === 'maxday' || subcommand === 'maxperday') {
+        const maxPerDay = Number.parseInt(args[0], 10);
+
+        if (!Number.isFinite(maxPerDay) || maxPerDay < 0) {
+            return message.reply('Usage: `!autoinvite maxday <number>`');
+        }
+
+        config.maxPerDay = Math.min(100000, maxPerDay);
+        saveVrchatAutoInviteStore();
+        scheduleVrchatAutoInviteQueue(0);
+        return message.reply(`Auto-invite daily limit is now ${config.maxPerDay}.`);
+    }
+
+    if (subcommand === 'ignore') {
+        const userId = normalizeVrchatAutoInviteUserId(args[0]);
+
+        if (!userId) {
+            return message.reply('Usage: `!autoinvite ignore <vrchat user id>`');
+        }
+
+        getVrchatAutoInviteStore().ignoredUsers[userId] = {
+            userId,
+            ignoredAt: new Date().toISOString(),
+            ignoredBy: message.author.id
+        };
+        removeVrchatAutoInviteFromQueue(userId);
+        saveVrchatAutoInviteStore();
+
+        return message.reply(`Ignored VRChat user \`${userId}\` for auto-invites.`);
+    }
+
+    if (subcommand === 'unignore') {
+        const userId = normalizeVrchatAutoInviteUserId(args[0]);
+
+        if (!userId) {
+            return message.reply('Usage: `!autoinvite unignore <vrchat user id>`');
+        }
+
+        delete getVrchatAutoInviteStore().ignoredUsers[userId];
+        saveVrchatAutoInviteStore();
+
+        return message.reply(`Removed VRChat user \`${userId}\` from the auto-invite ignore list.`);
+    }
+
+    if (subcommand === 'ignorelist') {
+        const ignoredUsers = Object.values(getVrchatAutoInviteStore().ignoredUsers);
+
+        if (!ignoredUsers.length) {
+            return message.reply('The auto-invite ignore list is empty.');
+        }
+
+        return message.channel.send(
+            ignoredUsers
+                .slice(0, 25)
+                .map((entry, index) => `${index + 1}. \`${entry.userId}\` ignored at ${entry.ignoredAt || 'unknown time'}`)
+                .join('\n')
+        );
+    }
+
+    if (subcommand === 'resend') {
+        const userId = normalizeVrchatAutoInviteUserId(args[0]);
+
+        if (!userId) {
+            return message.reply('Usage: `!autoinvite resend <vrchat user id>`');
+        }
+
+        const record = getVrchatAutoInviteUserRecord(userId, userId);
+
+        if (record.lastAgeGate !== true) {
+            return message.reply(
+                `I will not queue a resend for \`${userId}\` because their last seen instance is not confirmed age gated. ` +
+                'They need to be seen in an age-gated group instance first.'
+            );
+        }
+
+        record.retryCount = 0;
+        record.lastFailureReason = null;
+        record.status = 'queued';
+        removeVrchatAutoInviteFromQueue(userId);
+        enqueueVrchatAutoInvite({
+            userId,
+            displayName: record.displayName || userId,
+            instanceId: 'manual-resend',
+            worldName: null,
+            ageGate: true,
+            ageGateVerified: true
+        }, {
+            manual: true,
+            force: true,
+            front: true
+        });
+        saveVrchatAutoInviteStore();
+        scheduleVrchatAutoInviteQueue(0);
+
+        return message.reply(`Queued a forced resend for VRChat user \`${userId}\`.`);
+    }
+
+    if (subcommand === 'reset') {
+        const userId = normalizeVrchatAutoInviteUserId(args[0]);
+
+        if (!userId) {
+            return message.reply('Usage: `!autoinvite reset <vrchat user id>`');
+        }
+
+        delete getVrchatAutoInviteStore().users[userId];
+        removeVrchatAutoInviteFromQueue(userId);
+        vrchatAutoInviteMemberCache.delete(userId);
+        vrchatAutoInvitePendingCache.userIds.delete(userId);
+        saveVrchatAutoInviteStore();
+
+        return message.reply(`Reset auto-invite tracking for VRChat user \`${userId}\`.`);
+    }
+
+    if (subcommand === 'stats') {
+        await refreshVrchatAutoInvitePendingCache(true).catch(error => {
+            console.warn('Failed to refresh pending auto-invite stats:', error.message);
+        });
+        await syncVrchatAutoInviteAcceptedStats().catch(error => {
+            console.warn('Failed to refresh accepted auto-invite stats:', error.message);
+        });
+
+        const stats = getVrchatAutoInviteStatsSnapshot();
+
+        return message.channel.send({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor('#3498DB')
+                    .setTitle('VRChat Auto Invite Stats')
+                    .addFields(
+                        {
+                            name: 'Invites Sent Today',
+                            value: String(stats.sentToday),
+                            inline: true
+                        },
+                        {
+                            name: 'Invites Accepted',
+                            value: String(stats.accepted),
+                            inline: true
+                        },
+                        {
+                            name: 'Pending Invites',
+                            value: String(stats.pending),
+                            inline: true
+                        },
+                        {
+                            name: 'Failed Invites Today',
+                            value: String(stats.failedToday),
+                            inline: true
+                        },
+                        {
+                            name: 'Current Queue Size',
+                            value: String(stats.queueSize),
+                            inline: true
+                        }
+                    )
+                    .setTimestamp()
+            ]
+        });
+    }
+
+    if (subcommand === 'queue') {
+        return message.channel.send(getVrchatAutoInviteQueueText());
+    }
+
+    if (subcommand === 'clearqueue') {
+        const clearedCount = getVrchatAutoInviteStore().queue.length;
+        getVrchatAutoInviteStore().queue = [];
+        saveVrchatAutoInviteStore();
+        return message.reply(`Cleared ${clearedCount} queued auto-invite(s).`);
+    }
+
+    return message.reply(getVrchatAutoInviteUsage());
+
+}
+
 function formatLoggedMessageContent(content) {
 
     const safeContent = content && content.trim()
@@ -14114,6 +16021,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 \`!vrclinked [@user/userID]\` - Shows a linked VRChat account.
 \`!syncnick\` - Syncs your nickname to your verified VRChat name.
 \`!vrcaccountstatus\` - Staff: checks the connected VRChat cookie account.
+\`!autoinvite status/on/off\` - Staff: manages VRChat group auto-invites.
 \`!safetyscan status/run/blacklist/stop\` - Staff: checks, runs, or stops the VRChat safety scanner.
 \`!stopscan\` - Staff: safely stops the active safety scan and releases the scanner lock.
 \`!scanblacklist\` - Staff: checks members only against already-blacklisted groups.
@@ -14288,6 +16196,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!blacklistgroup' || command === '!vrcblacklist' || command === '!blacklistvrcgroup') {
         await handleVrchatBlacklistGroupCommand(message, args);
+        return;
+    }
+
+    if (command === '!autoinvite' || command === '!vrcautoinvite') {
+        await handleVrchatAutoInviteCommand(message, args);
         return;
     }
 
