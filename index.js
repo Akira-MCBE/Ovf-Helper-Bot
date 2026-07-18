@@ -12609,6 +12609,7 @@ function createVrchatAutoInviteScanStats(trigger) {
         eligibleUsers: 0,
         queuedInvites: 0,
         skippedUsers: 0,
+        skipReasons: {},
         lastError: null,
         instances: [],
         lines: [
@@ -12617,6 +12618,29 @@ function createVrchatAutoInviteScanStats(trigger) {
             `Time: ${formatVrchatAutoInviteClock(startedAt)}`
         ]
     };
+
+}
+
+function incrementVrchatAutoInviteSkipReason(stats, reason) {
+
+    if (!stats?.skipReasons) return;
+
+    const key = String(reason || 'Other');
+    stats.skipReasons[key] = Number(stats.skipReasons[key] || 0) + 1;
+
+}
+
+function formatVrchatAutoInviteSkipReasons(stats) {
+
+    const entries = Object.entries(stats?.skipReasons || {})
+        .filter(([, count]) => Number(count) > 0)
+        .sort((a, b) => Number(b[1]) - Number(a[1]));
+
+    if (!entries.length) return 'None';
+
+    return entries
+        .map(([reason, count]) => `${reason}: ${count}`)
+        .join('\n');
 
 }
 
@@ -12663,6 +12687,7 @@ async function sendVrchatAutoInviteScanSummary(stats) {
         `Eligible users: ${stats.eligibleUsers}`,
         `Queued invites: ${stats.queuedInvites}`,
         `Skipped users: ${stats.skippedUsers}`,
+        `Skip reasons:\n${formatVrchatAutoInviteSkipReasons(stats)}`,
         `Last error: ${stats.lastError || 'None'}`
     ].join('\n');
 
@@ -13405,6 +13430,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     if (isVrchatAutoInviteIgnored(candidate.userId)) {
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, 'Ignored users');
             pushVrchatAutoInviteScanLine(scanStats, 'X Ignored user');
         }
         await recordVrchatAutoInviteEvent({
@@ -13419,6 +13445,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     if (!force && hasVrchatAutoInviteQueued(candidate.userId)) {
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, 'Already queued');
             pushVrchatAutoInviteScanLine(scanStats, 'X Already in invite queue');
         }
         return 'already-queued';
@@ -13440,6 +13467,9 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     if (!ageVerification.verified) {
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, ageVerification.result?.unknown
+                ? 'Age verification not exposed'
+                : 'Not age verified');
             pushVrchatAutoInviteScanLine(scanStats, `X User is not age verified: ${ageVerification.reason}`);
         }
         await recordVrchatAutoInviteEvent({
@@ -13456,6 +13486,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
         displayName: candidate.displayName
     })) {
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, 'Existing group members');
             pushVrchatAutoInviteScanLine(scanStats, 'X Already in group');
         }
         await recordVrchatAutoInviteEvent({
@@ -13471,6 +13502,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
     if (!force && await hasVrchatAutoInvitePendingInvite(candidate.userId)) {
         record.status = 'pending';
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, 'Pending invites');
             pushVrchatAutoInviteScanLine(scanStats, 'X Pending invite already exists');
         }
         await recordVrchatAutoInviteEvent({
@@ -13487,6 +13519,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     if (cooldownRemainingMs > 0) {
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, 'Cooldown');
             pushVrchatAutoInviteScanLine(scanStats, `X Invite cooldown (${formatDurationFromMs(cooldownRemainingMs)} remaining)`);
         }
         await recordVrchatAutoInviteEvent({
@@ -13502,6 +13535,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     if (!force && hasVrchatAutoInviteExceededRetries(record)) {
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, 'Retry limit reached');
             pushVrchatAutoInviteScanLine(scanStats, `X Retry limit reached (${getVrchatAutoInviteConfig().maxRetries})`);
         }
         await recordVrchatAutoInviteEvent({
@@ -13520,6 +13554,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
         front
     })) {
         if (scanStats) {
+            incrementVrchatAutoInviteSkipReason(scanStats, 'Queue full');
             pushVrchatAutoInviteScanLine(scanStats, 'X Invite queue is full');
         }
         await recordVrchatAutoInviteEvent({
@@ -14166,7 +14201,10 @@ function getVrchatAutoInviteStatusText() {
         `Queue Worker: ${vrchatAutoInviteQueueRunning ? 'Running' : 'Idle'}.`,
         `Instances Found: ${lastScan.instancesFound || 0}.`,
         `Occupants Seen: ${lastScan.occupantsSeen || 0}.`,
+        `Candidate Users: ${lastScan.candidatesFound || 0}.`,
         `Eligible Users: ${lastScan.eligibleUsers || 0}.`,
+        `Skipped Users: ${lastScan.skippedUsers || 0}.`,
+        `Skip Reasons:\n${formatVrchatAutoInviteSkipReasons(lastScan)}.`,
         `Queued Invites: ${stats.queueSize}.`,
         `Last Scan Queued: ${lastScan.queuedInvites || 0}.`,
         `Invites Sent Today: ${stats.sentToday}.`,
