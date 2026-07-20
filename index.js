@@ -350,6 +350,7 @@ const VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID = process.env.VRCHAT_AUTO_INVITE_WEL
 const VRCHAT_AUTO_INVITE_JOIN_ROLE_ID = process.env.VRCHAT_AUTO_INVITE_JOIN_ROLE_ID || '';
 const DEFAULT_VRCHAT_AUTO_INVITE_ENABLED = process.env.VRCHAT_AUTO_INVITE_ENABLED === 'true';
 const DEFAULT_VRCHAT_AUTO_INVITE_FORCE_INVITES = process.env.VRCHAT_AUTO_INVITE_FORCE_INVITES !== 'false';
+const DEFAULT_VRCHAT_AUTO_INVITE_INCLUDE_AUTH_INSTANCE = process.env.VRCHAT_AUTO_INVITE_INCLUDE_AUTH_INSTANCE !== 'false';
 const DEFAULT_VRCHAT_AUTO_INVITE_COOLDOWN_HOURS = Math.max(
     1,
     Number.parseFloat(process.env.VRCHAT_AUTO_INVITE_COOLDOWN_HOURS || '168') || 168
@@ -12400,6 +12401,7 @@ function getDefaultVrchatAutoInviteConfig() {
     return {
         enabled: DEFAULT_VRCHAT_AUTO_INVITE_ENABLED,
         forceInvites: DEFAULT_VRCHAT_AUTO_INVITE_FORCE_INVITES,
+        includeAuthInstance: DEFAULT_VRCHAT_AUTO_INVITE_INCLUDE_AUTH_INSTANCE,
         groupId: VRCHAT_AUTO_INVITE_GROUP_ID,
         logChannelId: VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID,
         cooldownHours: DEFAULT_VRCHAT_AUTO_INVITE_COOLDOWN_HOURS,
@@ -12439,6 +12441,9 @@ function normalizeVrchatAutoInviteStore(savedStore = {}) {
     config.forceInvites = Object.prototype.hasOwnProperty.call(savedConfig, 'forceInvites')
         ? Boolean(config.forceInvites)
         : DEFAULT_VRCHAT_AUTO_INVITE_FORCE_INVITES;
+    config.includeAuthInstance = Object.prototype.hasOwnProperty.call(savedConfig, 'includeAuthInstance')
+        ? Boolean(config.includeAuthInstance)
+        : DEFAULT_VRCHAT_AUTO_INVITE_INCLUDE_AUTH_INSTANCE;
     config.groupId = String(config.groupId || defaults.config.groupId || '').trim();
     config.logChannelId = VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID;
     config.cooldownHours = coerceVrchatAutoInviteNumber(
@@ -12610,6 +12615,8 @@ function createVrchatAutoInviteScanStats(trigger) {
         finishedAt: null,
         trigger,
         instancesFound: 0,
+        authInstanceIncluded: false,
+        authInstanceLocation: null,
         occupantsSeen: 0,
         candidatesFound: 0,
         eligibleUsers: 0,
@@ -13027,6 +13034,51 @@ function getVrchatAutoInviteInstanceUserCount(instance) {
 
 }
 
+function isVrchatAutoInviteUsableLocation(location) {
+
+    const text = String(location || '').trim();
+
+    if (!text || !text.includes(':')) return false;
+
+    const lowered = text.toLowerCase();
+
+    return !['offline', 'private', 'hidden', 'traveling'].includes(lowered);
+
+}
+
+function getVrchatAutoInviteAuthUserLocation(authUser) {
+
+    const candidateLocations = [
+        authUser?.location,
+        authUser?.travelingToLocation,
+        authUser?.currentLocation,
+        authUser?.instance?.location,
+        authUser?.presence?.location
+    ];
+
+    for (const location of candidateLocations) {
+        if (isVrchatAutoInviteUsableLocation(location)) {
+            return String(location).trim();
+        }
+    }
+
+    const worldId = authUser?.worldId || authUser?.world?.id;
+    const instanceId = authUser?.instanceId || authUser?.instance?.id;
+
+    if (worldId && instanceId) {
+        const location = `${worldId}:${instanceId}`;
+
+        return isVrchatAutoInviteUsableLocation(location) ? location : '';
+    }
+
+    return '';
+
+}
+
+async function fetchVrchatAutoInviteAuthUser() {
+    return await requestVrchatApiJson('GET', '/auth/user');
+}
+
 function getVrchatAutoInviteAgeVerificationSkipReason(result, error = null) {
 
     if (error) {
@@ -13121,8 +13173,10 @@ async function fetchVrchatAutoInviteInstanceDetail(instance) {
 
 async function collectVrchatAutoInviteCandidates(scanStats = null) {
 
+    const config = getVrchatAutoInviteConfig();
     const instances = await fetchVrchatAutoInviteGroupInstances();
     const candidates = new Map();
+    let authUserId = null;
 
     if (scanStats) {
         scanStats.instancesFound = instances.length;
@@ -13130,12 +13184,56 @@ async function collectVrchatAutoInviteCandidates(scanStats = null) {
         pushVrchatAutoInviteScanLine(scanStats, `Found ${instances.length} group instance(s).`);
     }
 
+    if (config.includeAuthInstance) {
+        const authUser = await fetchVrchatAutoInviteAuthUser().catch(error => {
+            if (scanStats) {
+                pushVrchatAutoInviteScanLine(scanStats, `Could not load authenticated VRChat account instance: ${error.message}`);
+            }
+            console.warn('Failed to fetch authenticated VRChat account for auto-invite:', error.message);
+            return null;
+        });
+        const authLocation = getVrchatAutoInviteAuthUserLocation(authUser);
+        authUserId = normalizeVrchatAutoInviteUserId(authUser?.id || '');
+
+        if (authLocation) {
+            const knownLocations = new Set(instances.map(getVrchatAutoInviteInstanceLocation).filter(Boolean));
+
+            if (scanStats) {
+                scanStats.authInstanceLocation = authLocation;
+            }
+
+            if (!knownLocations.has(authLocation)) {
+                instances.push({
+                    location: authLocation,
+                    source: 'auth-user',
+                    world: {
+                        name: 'Authenticated account current instance'
+                    }
+                });
+                if (scanStats) {
+                    scanStats.instancesFound = instances.length;
+                    scanStats.authInstanceIncluded = true;
+                    pushVrchatAutoInviteScanLine(scanStats, `Also scanning authenticated account current instance: ${authLocation}`);
+                }
+            } else {
+                if (scanStats) {
+                    scanStats.authInstanceIncluded = true;
+                    pushVrchatAutoInviteScanLine(scanStats, `Authenticated account is already in a scanned group instance: ${authLocation}`);
+                }
+            }
+        } else if (scanStats) {
+            pushVrchatAutoInviteScanLine(scanStats, 'Authenticated account current instance was not visible or usable.');
+        }
+    } else if (scanStats) {
+        pushVrchatAutoInviteScanLine(scanStats, 'Authenticated account instance scanning is off.');
+    }
+
     for (const [index, instance] of instances.entries()) {
 
         let detailedInstance = instance;
         let users = getVrchatAutoInviteInstanceUsers(detailedInstance);
 
-        if (users.length === 0 && getVrchatAutoInviteInstanceUserCount(instance) > 0) {
+        if ((users.length === 0 && getVrchatAutoInviteInstanceUserCount(instance) > 0) || instance?.source === 'auth-user') {
             const previousInstance = detailedInstance;
             const previousUsers = users;
             const fetchedDetail = await fetchVrchatAutoInviteInstanceDetail(instance).catch(error => {
@@ -13171,6 +13269,7 @@ async function collectVrchatAutoInviteCandidates(scanStats = null) {
             const userId = normalizeVrchatAutoInviteUserId(user?.id || user?.userId || '');
 
             if (!userId) continue;
+            if (authUserId && userId === authUserId) continue;
 
             candidates.set(userId, {
                 userId,
@@ -14265,6 +14364,7 @@ function getVrchatAutoInviteStatusText() {
     return [
         `Auto-invite: ${config.enabled ? 'on' : 'off'}.`,
         `Force Invites: ${config.forceInvites ? 'on' : 'off'}.`,
+        `Auth Instance Scan: ${config.includeAuthInstance ? 'on' : 'off'}.`,
         `Auto Invite Worker: ${vrchatAutoInviteWorkerStarted ? 'Running' : 'Stopped'}.`,
         `Currently Scanning: ${vrchatAutoInviteScanRunning ? 'Yes' : 'No'}.`,
         `Last Scan: ${formatVrchatAutoInviteClock(lastScan.finishedAt || lastScan.startedAt)}.`,
@@ -14274,6 +14374,8 @@ function getVrchatAutoInviteStatusText() {
         missingSettings.length ? `Missing: ${missingSettings.join(', ')}.` : null,
         `Queue Worker: ${vrchatAutoInviteQueueRunning ? 'Running' : 'Idle'}.`,
         `Instances Found: ${lastScan.instancesFound || 0}.`,
+        `Auth Instance Included: ${lastScan.authInstanceIncluded ? 'yes' : 'no'}.`,
+        lastScan.authInstanceLocation ? `Auth Instance: ${lastScan.authInstanceLocation}.` : null,
         `Occupants Seen: ${lastScan.occupantsSeen || 0}.`,
         `Candidate Users: ${lastScan.candidatesFound || 0}.`,
         `Eligible Users: ${lastScan.eligibleUsers || 0}.`,
@@ -14305,6 +14407,7 @@ function getVrchatAutoInviteUsage() {
         '`!autoinvite status`',
         '`!autoinvite run`',
         '`!autoinvite force on/off`',
+        '`!autoinvite myinstance on/off`',
         '`!autoinvite cooldown <hours>`',
         '`!autoinvite delay <seconds>`',
         '`!autoinvite maxhour <number>`',
@@ -14406,6 +14509,24 @@ async function handleVrchatAutoInviteCommand(message, args) {
         }
 
         return message.reply(`Force invites are currently **${config.forceInvites ? 'on' : 'off'}**. Usage: \`!autoinvite force on/off\``);
+    }
+
+    if (subcommand === 'myinstance' || subcommand === 'authinstance' || subcommand === 'accountinstance') {
+        const mode = (args[0] || '').toLowerCase();
+
+        if (mode === 'on' || mode === 'true' || mode === 'enable' || mode === 'enabled') {
+            config.includeAuthInstance = true;
+            saveVrchatAutoInviteStore();
+            return message.reply('Authenticated account instance scanning is now **on**.');
+        }
+
+        if (mode === 'off' || mode === 'false' || mode === 'disable' || mode === 'disabled') {
+            config.includeAuthInstance = false;
+            saveVrchatAutoInviteStore();
+            return message.reply('Authenticated account instance scanning is now **off**.');
+        }
+
+        return message.reply(`Authenticated account instance scanning is currently **${config.includeAuthInstance ? 'on' : 'off'}**. Usage: \`!autoinvite myinstance on/off\``);
     }
 
     if (subcommand === 'run' || subcommand === 'scan') {
