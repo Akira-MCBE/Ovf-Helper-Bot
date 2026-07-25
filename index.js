@@ -10,7 +10,9 @@ const {
     ChannelType,
     ApplicationCommandOptionType,
     ActivityType,
-    Partials
+    Partials,
+    StringSelectMenuBuilder,
+    StringSelectMenuOptionBuilder
 } = require('discord.js');
 
 const fs = require('fs');
@@ -611,6 +613,7 @@ client.once('clientReady', async () => {
     loadXpRecords();
     loadSuggestions();
     loadWaifuPlayers();
+    loadRpgStore();
     loadVrchatSafetyBlacklist();
     loadVrchatSafetyState();
     loadVrchatAutoInviteStore();
@@ -16351,8 +16354,3950 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 });
 
 // ==========================================
+// ADVENTURER GUILD RPG
+// ==========================================
+
+const RPG_STORE_FILE = process.env.RPG_STORE_FILE || path.join(process.cwd(), 'adventurer-guild-rpg.json');
+const RPG_HUNT_COOLDOWN_MS = 30 * 1000;
+const RPG_DUNGEON_COOLDOWN_MS = 10 * 60 * 1000;
+const RPG_BOSS_COOLDOWN_MS = 30 * 60 * 1000;
+const RPG_MAX_PARTY_SIZE = 4;
+const RPG_DUNGEON_DIFFICULTIES = {
+    Normal: { enemy: 1, reward: 1 },
+    Hard: { enemy: 1.35, reward: 1.45 },
+    Nightmare: { enemy: 1.8, reward: 2.1 },
+    Mythic: { enemy: 2.45, reward: 3.1 }
+};
+
+const RPG_RANKS = ['Bronze', 'Silver', 'Gold', 'Emerald', 'Diamond', 'Platinum'];
+const RPG_RANK_REQUIREMENTS = {
+    Silver: 500,
+    Gold: 1500,
+    Emerald: 4000,
+    Diamond: 8500,
+    Platinum: 15000
+};
+const RPG_RANK_COLORS = {
+    Bronze: '#B87333',
+    Silver: '#C0C0C0',
+    Gold: '#F1C40F',
+    Emerald: '#2ECC71',
+    Diamond: '#5DADE2',
+    Platinum: '#E5E4E2'
+};
+const RPG_RARITY_COLORS = {
+    Common: '#95A5A6',
+    Uncommon: '#2ECC71',
+    Rare: '#3498DB',
+    Epic: '#9B59B6',
+    Legendary: '#F1C40F',
+    Mythic: '#E74C3C'
+};
+const RPG_STAT_KEYS = ['strength', 'intelligence', 'defense', 'health', 'agility', 'stamina'];
+const RPG_STAT_LABELS = {
+    strength: '⚔️ Strength',
+    intelligence: '🔮 Intelligence',
+    defense: '🛡️ Defense',
+    health: '❤️ Health',
+    agility: '💨 Agility',
+    stamina: '⚡ Stamina'
+};
+const RPG_EMOJIS = {
+    ranks: {
+        Bronze: '🥉',
+        Silver: '🥈',
+        Gold: '🥇',
+        Emerald: '💚',
+        Diamond: '💎',
+        Platinum: '👑'
+    },
+    rarities: {
+        Common: '⚪',
+        Uncommon: '🟢',
+        Rare: '🔵',
+        Epic: '🟣',
+        Legendary: '🟡',
+        Mythic: '🔴'
+    },
+    statuses: {
+        Burn: '🔥',
+        Poison: '☠️',
+        Bleed: '🩸',
+        Freeze: '❄️',
+        Stun: '💫',
+        Shock: '⚡',
+        Curse: '🌑',
+        Shielded: '🛡️',
+        Haste: '💨',
+        'Defense Buff': '🛡️',
+        'Defense Down': '💔',
+        'Strength Buff': '💪',
+        'Intelligence Buff': '🧠',
+        Drain: '🩸',
+        Heal: '💚'
+    },
+    contractTypes: {
+        Hunt: '⚔️',
+        Gathering: '🧺',
+        Boss: '👑',
+        Dungeon: '🏰',
+        Dragon: '🐉',
+        Emergency: '🚨'
+    },
+    difficulties: {
+        Normal: '🟢',
+        Hard: '🟠',
+        Nightmare: '🟣',
+        Mythic: '🔴'
+    },
+    actions: {
+        attack: '⚔️',
+        skill: '✨',
+        defend: '🛡️',
+        potion: '🧪',
+        flee: '🏃'
+    },
+    enemies: {
+        forest_wolf: '🐺',
+        slime: '🟢',
+        goblin: '👺',
+        cave_bat: '🦇',
+        armored_goblin: '🛡️',
+        giant_spider: '🕷️',
+        bandit: '🥷',
+        forest_troll: '🧌',
+        orc_warrior: '👹',
+        basilisk: '🐍',
+        ogre_brute: '🪨',
+        shadow_beast: '🐈‍⬛',
+        wyvern: '🐲',
+        necromancer_apprentice: '💀',
+        lesser_dragon: '🐉',
+        ancient_construct: '🗿',
+        frost_giant: '🥶',
+        sky_guardian: '🪽',
+        demon_general: '😈',
+        ancient_dragon: '🐉'
+    },
+    dungeons: {
+        small_cave: '🕳️',
+        bandit_camp: '⛺',
+        ancient_ruins: '🏛️',
+        haunted_catacombs: '⚰️',
+        crystal_dungeon: '💎',
+        sky_fortress: '🏯',
+        ancient_dragon_lair: '🌋'
+    },
+    resources: {
+        hp: '❤️', mana: '💙', stamina: '⚡', gold: '🟡', exp: '✨', reputation: '🏰',
+        statPoints: '📊', skillPoints: '🌟', durability: '🔧', level: '⭐', streak: '🔥'
+    },
+    npcs: {
+        guildMaster: '🧙‍♂️', receptionist: '🧝‍♀️', quartermaster: '🧔', blacksmith: '👨‍🏭',
+        alchemist: '🧪', scout: '🦅', bard: '🎻'
+    },
+    places: {
+        guildHall: '🏰', contractBoard: '📜', tavern: '🍗', infirmary: '🏥', forge: '🔥',
+        shop: '🏪', trainingYard: '🎯', dungeonGate: '🚪', trophyHall: '🏆'
+    },
+    events: {
+        blessing: '✨', healingWind: '🌿', fallingRocks: '🪨', opening: '🎯', rally: '📣',
+        treasure: '🎁', trap: '🪤', eclipse: '🌘', storm: '⛈️', campfire: '🔥'
+    }
+};
+
+const RPG_FLAVOR_LINES = {
+    battleStart: [
+        'The guild seal flashes as steel leaves its sheath.',
+        'A dangerous presence closes in. Stay alert, adventurer.',
+        'The air grows heavy—the encounter has begun.',
+        'Your contract seal glows. The target is near.',
+        'Dust rises from the road as your enemy takes position.',
+        'A distant horn sounds. There is no turning back now.'
+    ],
+    victory: [
+        'The Guild Master will hear of this victory.',
+        'Another legend is written into the guild archives.',
+        'The battlefield falls silent. Your party stands victorious.',
+        'A hard-earned victory—and better loot may await ahead.',
+        'The contract seal burns gold: objective progress confirmed.',
+        'Nearby scouts cheer as the danger finally passes.'
+    ],
+    guild: [
+        'Fresh contracts have been pinned to the quest board.',
+        'The tavern is loud, the forge is hot, and adventure waits.',
+        'Guild clerks hurry between the contract board and reward counter.',
+        'Veteran adventurers trade rumors near the great hearth.',
+        'The city bells echo through the guild’s stained-glass windows.',
+        'A bard is already turning yesterday’s victories into song.'
+    ],
+    attack: [
+        'A clean opening appears between the enemy’s guard.',
+        'Your weapon hums with practiced precision.',
+        'The strike lands with a shower of sparks.',
+        'The enemy staggers as your attack breaks through.'
+    ],
+    skill: [
+        'Arcane symbols ignite around the battlefield.',
+        'Your training takes over as the technique is unleashed.',
+        'Power surges through your guild crest.',
+        'The battlefield flashes with concentrated energy.'
+    ],
+    danger: [
+        'The enemy’s pressure is rising—prepare for impact.',
+        'A killing intent rolls across the battlefield.',
+        'The guild crest warns of a dangerous incoming attack.',
+        'The air distorts around the enemy’s next move.'
+    ],
+    loot: [
+        'Something gleams beneath the settling dust.',
+        'The guild appraisal seal identifies a useful material.',
+        'A rare shimmer catches your eye among the remains.',
+        'Your gathering pouch grows heavier.'
+    ],
+    forge: [
+        'The blacksmith strikes the anvil and sparks fill the workshop.',
+        'Molten metal glows beneath the forge hammer.',
+        'The quartermaster checks every material twice.',
+        'A newly sharpened blade sings against the whetstone.'
+    ],
+    shop: [
+        'The alchemist lines up fresh bottles behind the counter.',
+        'A tiny bell rings as the guild shop opens.',
+        'The quartermaster has restocked the expedition shelves.',
+        'Potion vapors curl through the air in bright colors.'
+    ],
+    contract: [
+        'The receptionist stamps the contract with the guild seal.',
+        'A scout marks the target’s last known location on your map.',
+        'The parchment grows warm as the objective binds to your profile.',
+        'The Guild Master expects a full report upon your return.'
+    ]
+};
+
+
+const RPG_NPC_PROFILES = {
+    receptionist: {
+        name: 'Lady Seraphine Vale',
+        title: 'Guild Receptionist',
+        emoji: RPG_EMOJIS.npcs.receptionist,
+        color: '#B03A78',
+        personality: 'Calm, commanding, gently protective, impeccably organized, and fond of firm praise. She expects adventurers to listen the first time.',
+    },
+    guildMaster: {
+        name: 'Guild Master Aldric Stonecrest',
+        title: 'Guild Master',
+        emoji: RPG_EMOJIS.npcs.guildMaster,
+        color: '#7D6608',
+        personality: 'A stern but honorable veteran who values discipline, courage, preparation, and protecting weaker adventurers.',
+    },
+    quartermaster: {
+        name: 'Bram Ironledger',
+        title: 'Guild Quartermaster',
+        emoji: RPG_EMOJIS.npcs.quartermaster,
+        color: '#7F8C8D',
+        personality: 'Gruff, practical, obsessive about inventory records, secretly kind, and armed with endless dry jokes about broken equipment.',
+    },
+    blacksmith: {
+        name: 'Hilda Emberforge',
+        title: 'Guild Blacksmith',
+        emoji: RPG_EMOJIS.npcs.blacksmith,
+        color: '#A04000',
+        personality: 'Loud, fearless, proud of honest craftsmanship, delighted by difficult materials, and generous with tough love.',
+    },
+    alchemist: {
+        name: 'Mirelle Moonflask',
+        title: 'Guild Alchemist',
+        emoji: RPG_EMOJIS.npcs.alchemist,
+        color: '#27AE60',
+        personality: 'Bright, eccentric, deeply knowledgeable, easily excited by strange ingredients, and only slightly too casual about bubbling liquids.',
+    },
+    scout: {
+        name: 'Kael Windstep',
+        title: 'Guild Scout',
+        emoji: RPG_EMOJIS.npcs.scout,
+        color: '#1F618D',
+        personality: 'Quiet, observant, efficient, hard to surprise, and prone to speaking in concise warnings that sound like prophecies.',
+    },
+    bard: {
+        name: 'Lyra Goldstring',
+        title: 'Guild Bard',
+        emoji: RPG_EMOJIS.npcs.bard,
+        color: '#8E44AD',
+        personality: 'Theatrical, charming, playful, shamelessly dramatic, and always ready to turn ordinary guild business into a heroic legend.',
+    }
+};
+
+const RPG_NPC_DIALOGUE = {
+    receptionist: {
+        greeting: [
+            'Welcome to the Adventurer Guild. Give me your name, choose your path, and let me take care of the rest.',
+            'You are safe inside these walls. Outside them, you will follow procedure and return when ordered.',
+            'New adventurer paperwork is simple when you cooperate. Class, signature, guild crest—one at a time.',
+            'I can already tell you are eager. Patience. A good adventurer learns the rules before breaking records.',
+            'Come closer. I need to see the person whose name I am about to place in the Guild ledger.',
+            'The Guild accepts courage, discipline, and a willingness to listen. I suspect you can manage all three.',
+            'I will register you, equip you, and point you toward your first contract. You will not rush me.',
+            'A new adventure begins at my desk, dear. Let us make sure yours begins correctly.'
+        ],
+        ambient: [
+            'I have reorganized the contract board. Again. The scouts keep returning with inconveniently accurate reports.',
+            'Your file is right where I left it. Unlike several adventurers I could name.',
+            'The Guild Hall runs smoothly because I refuse to allow chaos near my desk.',
+            'I noticed you the moment you entered. Adventurers carrying that much dust are difficult to miss.',
+            'There is always another contract, but there is only one of you. Choose accordingly.',
+            'I have tea, sealed reports, and exactly enough patience for one reckless decision.',
+            'The Guild Master handles speeches. I handle everything that actually keeps the hall functioning.',
+            'You may linger for a moment. Even heroes are allowed to breathe between disasters.',
+            'I updated your record before you reached the counter. Yes, I am that efficient.',
+            'Try not to look so nervous. I only become frightening when forms are incomplete.'
+        ],
+        recovery: [
+            'You are going to drink a healing potion before leaving this hall. That is not a suggestion.',
+            'Your health is far too low for another assignment. Sit down, breathe, and recover properly.',
+            'I will not stamp a contract for someone who can barely stand. Heal first, then return to me.',
+            'No, dear. The heroic limp is not convincing. Use a potion.',
+            'You look exhausted. I am placing your paperwork on hold until you take care of yourself.',
+            'The monsters can wait. Your recovery cannot.',
+            'You came back alive, which was the first instruction. Now follow the second and restore your health.',
+            'I need my adventurers capable, not merely stubborn. Recover before you leave.'
+        ],
+        contractsWaiting: [
+            'Fresh {rank} contracts are ready. Choose one, and choose with your head rather than your ego.',
+            'No active assignment is recorded under your name. Come to the board and let me find you suitable work.',
+            'The {rank} board has been updated. Read every objective before you ask for my seal.',
+            'You are currently unassigned. I can correct that whenever you are prepared.',
+            'There are contracts waiting, dear. I suggest one that challenges you without burying you.',
+            'The Guild has work for someone of your rank. Stand beside me and review the options carefully.',
+            'Your file looks terribly empty without an active contract.',
+            'Pick a contract you can finish. I prefer successful reports to dramatic excuses.'
+        ],
+        contractBoard: [
+            'Read the rank, location, objective, and reward before selecting anything. I will know if you skipped a line.',
+            'The board is organized by danger, not by how impressive the title sounds.',
+            'Choose one assignment. The Guild does not permit adventurers to collect contracts like tavern coasters.',
+            'I have marked the contracts suited to your current rank. The red seals deserve extra caution.',
+            'Take your time. A contract accepted carelessly still becomes your responsibility.',
+            'Every parchment on this board represents someone asking the Guild for help.',
+            'The rewards are listed clearly, but survival remains your responsibility.',
+            'Select the work that matches your strength, supplies, and common sense.'
+        ],
+        contractAccepted: [
+            'Your contract for {contract} is registered, stamped, and sealed. You will return safely and report directly to me.',
+            'The Guild ledger now lists {contract} as your active assignment. I expect careful work.',
+            'Everything is in order. {contract} belongs to you until completion or formal abandonment.',
+            'Contract accepted. I have marked the route and notified the scouts to expect you.',
+            'The seal is active. Complete the objective, collect proof, and come straight back.',
+            'Good choice. {contract} should test you without wasting your talents.',
+            'Your signature is recorded. Do not make me send a retrieval party after you.',
+            'The assignment is yours, dear. Make the Guild proud and make me worry as little as possible.'
+        ],
+        contractDenied: [
+            'I cannot register that contract: {reason} Read the requirement again.',
+            'The Guild ledger rejected the request. {reason}',
+            'That assignment is not available to you right now. {reason}',
+            'No. I will not stamp paperwork that violates Guild rules. {reason}',
+            'You may dislike the answer, but it remains no. {reason}',
+            'I am protecting both you and the Guild by refusing this request. {reason}',
+            'Try again after correcting the problem: {reason}',
+            'Do not pout at me, adventurer. The requirement exists for a reason: {reason}'
+        ],
+        contractAbandoned: [
+            'I removed {contract} from your record. There is no penalty, but there will be no reward.',
+            'The contract for {contract} has returned to the board. Regroup before choosing another.',
+            'Your withdrawal from {contract} is recorded. A wise retreat is better than a foolish grave.',
+            'Abandonment approved. I would rather process one cancelled contract than one casualty report.',
+            'The seal has been broken and the assignment released.',
+            'You made the decision; I handled the paperwork. Learn from it and move forward.',
+            '{contract} is no longer your responsibility. Take a breath before accepting new work.',
+            'No shame. Just better preparation next time.'
+        ],
+        contractCompleted: [
+            'Excellent work. I verified {contract} and released every reward to your account.',
+            'Your completion report for {contract} is approved. The Guild ledger has been updated.',
+            'Contract confirmed: {contract}. Gold, experience, and reputation are recorded.',
+            'You completed {contract} exactly as promised. Very good.',
+            'The objective is verified and the seal has turned gold. I am pleased with you.',
+            'Successful return, complete report, no missing paperwork. You are becoming one of my favorites.',
+            '{contract} is officially closed. The Guild recognizes your service.',
+            'You did well, dear. Take the praise before I assign you something harder.'
+        ],
+        saleReview: [
+            '{item} is {rarity}. Look at me and confirm that you truly want to sell it.',
+            'Rare materials are difficult to replace. I will not finalize this exchange without your certainty.',
+            'I need a direct confirmation before placing {item} into the Guild exchange.',
+            'This is valuable enough that I am giving you one final chance to reconsider.',
+            'Do not click carelessly. {item} may be needed for stronger equipment later.',
+            'I protect adventurers from monsters and regrettable financial decisions.',
+            'Confirm only if the Gold matters more than the future recipe.',
+            'Think carefully, dear. Once the exchange closes, the material belongs to the Guild.'
+        ],
+        sale: [
+            'Exchange complete. I credited {gold} Gold for {quantity}× {item}.',
+            'The Guild accepted {quantity}× {item}. Your purse is {gold} Gold heavier.',
+            'Sale recorded and payment issued: {gold} Gold.',
+            'Everything counted, valued, and entered correctly. Your payment is ready.',
+            'The exchange is complete. Try not to spend all {gold} Gold on emergency potions.',
+            'I approved the sale and updated your inventory ledger.',
+            '{quantity}× {item} transferred successfully. Good business.',
+            'Payment delivered. Sensible adventurers invest at least some of it in survival.'
+        ],
+        saleCancelled: [
+            'Understood. I cancelled the exchange and returned every material to your inventory.',
+            'The sale is cancelled. Nothing was removed.',
+            'A cautious decision. Your materials remain under your name.',
+            'No problem. I would rather cancel a sale than watch you regret it.',
+            'The exchange window is closed and your inventory remains untouched.',
+            'Good. You took the time to reconsider instead of acting impulsively.',
+            'Cancellation recorded. Keep the material until you know what you need.',
+            'Your valuables are safe, dear.'
+        ],
+        rankUp: [
+            'Congratulations, {adventurer}. Every Guild record now shows your new {rank} rank.',
+            'Your promotion paperwork is complete. From this moment forward, you are registered as {rank}.',
+            'The Guild seal recognizes you as a {rank} adventurer. New responsibilities begin now.',
+            'You earned this promotion. Stand proudly while I update the ledger.',
+            'Your rank has changed, but my expectations have risen with it.',
+            'The new badge suits you. Do not let it make you careless.',
+            'Promotion approved and recorded. Very good, adventurer.',
+            'You have grown stronger. I have noticed.'
+        ],
+        missionBoard: [
+            'Daily and weekly work builds the habits that grand victories depend on.',
+            'Small missions are not beneath you. Consistency is how legends are made.',
+            'Review the objectives carefully. Progress is tracked automatically.',
+            'The Guild rewards reliability, not just dramatic boss kills.',
+            'Complete every requirement before asking me to release the bundle.',
+            'I have prepared your current mission report. Keep the numbers moving.',
+            'A disciplined adventurer checks the mission board before leaving the hall.',
+            'These tasks may look ordinary. Their rewards are not.'
+        ],
+        missionClaimed: [
+            'Your {mission} mission report is approved. I released the full reward bundle.',
+            'The Guild ledger confirms every {mission} objective. Your rewards are ready.',
+            'Mission verification complete. The {mission} payment has been added to your account.',
+            'Every requirement is satisfied. Good work.',
+            'You completed the entire {mission} list. That level of discipline pleases me.',
+            'Rewards claimed and record updated. No missing signatures this time.',
+            'The Guild appreciates consistency. I appreciate competent paperwork.',
+            'Your {mission} duties are complete. Enjoy the reward before the next cycle begins.'
+        ],
+        classRegistered: [
+            'Your {className} path is registered. I expect you to learn it properly, not merely look impressive.',
+            'The Guild now recognizes you as a {className}. Your starter equipment is already assigned.',
+            'Class selection confirmed. This path is permanent, so make it worthy of you.',
+            'Your crest has accepted the {className} discipline.',
+            'A {className}, then. Good. I have adjusted your file and training recommendations.',
+            'Everything is official. You may begin acting like an adventurer now.',
+            'Your chosen path is sealed into the Guild record.',
+            'The Guild welcomes its newest {className}.'
+        ],
+        profile: [
+            'Your record is current. I check it more often than you think.',
+            'Level, rank, equipment, contract, title—everything is exactly where it belongs.',
+            'Your profile tells me what you have done. Your next choice tells me who you are becoming.',
+            'I corrected three tiny ledger errors before showing this to you. You are welcome.',
+            'Review your resources before accepting difficult work.',
+            'Your Guild record is respectable. Keep it that way.',
+            'I have highlighted the areas that need your attention.',
+            'There you are in ink and seal. Try to live up to the flattering parts.'
+        ],
+        party: [
+            'Parties are limited to four. Choose companions who listen under pressure.',
+            'A balanced party survives mistakes that would defeat a lone adventurer.',
+            'I will register the group once every member accepts.',
+            'Do not invite someone merely because they look heroic in the tavern.',
+            'Party records are shared; loot remains individual.',
+            'Protect one another. I dislike processing four casualty reports at once.',
+            'A proper party needs trust, supplies, and someone willing to read the map.',
+            'Bring everyone back, dear. That is an order.'
+        ]
+    },
+    guildMaster: {
+        greeting: [
+            'Welcome to the Guild. Your rank begins at Bronze, but your conduct begins at professional.',
+            'Every hero was once an unknown name at this gate.',
+            'The Guild offers opportunity, not certainty. What you become is your decision.',
+            'Choose your class with purpose. Training without purpose creates dangerous fools.',
+            'You stand among adventurers now. Earn the crest you have been given.',
+            'Courage brought you here. Discipline will carry you farther.',
+            'The Guild protects the realm because its members protect one another.',
+            'Begin humbly. Grow relentlessly.'
+        ],
+        ambient: [
+            'The Guild is strongest when its newest members are properly prepared.',
+            'Reputation is not fame. It is proof that others can trust you.',
+            'A quiet hall means the scouts found trouble.',
+            'Every trophy in this chamber cost someone sweat, blood, or both.',
+            'The rank above you is earned through consistent service.',
+            'Do not envy veterans. Study them.',
+            'The Guild does not demand perfection. It demands responsibility.',
+            'Strength without judgment is merely a larger mistake.'
+        ],
+        training: [
+            'Unused stat and skill points are strength left sleeping.',
+            'Invest according to your class, not your impatience.',
+            'A Swordsman survives through balance. A Mage survives through control.',
+            'Training is the battle you choose before the battle chooses you.',
+            'Strengthen your weaknesses without neglecting your purpose.',
+            'Every point spent should support a plan.',
+            'Power earned but not mastered becomes a liability.',
+            'Return to the training yard before your next difficult contract.'
+        ],
+        stats: [
+            'Your attributes define what your equipment and skills can accomplish.',
+            'Spend carefully. There are no heroic refunds for poor judgment.',
+            'Strength and Intelligence shape offense; Health and Defense keep that offense alive.',
+            'Agility decides who acts first and who avoids the grave.',
+            'Stamina is not glamorous until it runs out.',
+            'A balanced adventurer may lack spectacle but rarely lacks options.',
+            'Build for the battles ahead, not only the monsters behind you.',
+            'Numbers become instincts after enough training.'
+        ],
+        skills: [
+            'A skill is a promise between training and execution.',
+            'Unlock abilities you can support with your resources.',
+            'Mastery comes from choosing the correct technique, not the loudest one.',
+            'Every class path has purpose. Do not scatter your focus carelessly.',
+            'Powerful skills mean nothing when used at the wrong moment.',
+            'Build a reliable core before pursuing rare techniques.',
+            'Learn one lesson completely before chasing three more.',
+            'Your best skill is the one that keeps the party moving.'
+        ],
+        rankUp: [
+            'Your service has earned recognition. Carry the new rank with humility.',
+            'The badge changes today. The responsibility changed long ago.',
+            'You have proven reliable under the duties of your former rank.',
+            'Stand before the Guild and accept the weight of promotion.',
+            'New contracts will test more than your damage numbers.',
+            'The Guild entrusts you with greater danger because you have earned greater trust.',
+            'Let the rank remind you how many people now depend on your judgment.',
+            'Promotion is not the end of a climb. It is permission to begin a harder one.'
+        ],
+        bossWarning: [
+            'Boss contracts punish weak preparation. Check supplies, equipment, and party readiness.',
+            'A boss does not fight like an ordinary monster. Expect phases and changing patterns.',
+            'Study the enemy intent and defend when strength alone will fail.',
+            'Do not confuse courage with refusing to retreat.',
+            'Rare rewards attract careless adventurers. Do not become one.',
+            'If the target is above your level, strengthen yourself before challenging it.',
+            'Bosses expose every weakness in a party.',
+            'Enter with a plan for the final phase, not merely the first.'
+        ],
+        dungeonWarning: [
+            'A dungeon is a campaign compressed into five rooms.',
+            'Conserve potions and resources before the final chamber.',
+            'The party leader sets the pace; every member bears the consequences.',
+            'Difficulty increases rewards and punishes mistakes equally.',
+            'A dungeon victory is earned room by room.',
+            'Do not spend everything on the first enemy.',
+            'Expect traps, changing conditions, and an exhausted final battle.',
+            'Leave pride at the entrance. Bring preparation.'
+        ],
+        victory: [
+            'Well fought. Record what worked before celebration erases the lesson.',
+            'The Guild recognizes this victory.',
+            'You protected the realm and strengthened your name.',
+            'Victory earned through discipline deserves respect.',
+            'Stand proud, then prepare for the next duty.',
+            'Your enemy fell because your training held.',
+            'A completed battle is proof. A completed contract is service.',
+            'Let this success build confidence, not arrogance.'
+        ],
+        defeat: [
+            'Defeat is information purchased painfully. Use it.',
+            'Recover, repair, and return with a better plan.',
+            'You survived. That means the lesson is still useful.',
+            'There is no shame in falling. There is shame in learning nothing.',
+            'Review the enemy pattern before challenging it again.',
+            'Rest is part of training when the body has reached its limit.',
+            'The Guild will not abandon you for one loss.',
+            'Stand again when you are ready, not merely angry.'
+        ],
+        party: [
+            'A party is a promise to protect more than yourself.',
+            'The strongest member is not always the leader the group needs.',
+            'Communicate before the battle becomes loud.',
+            'Share responsibility, not blame.',
+            'A balanced party turns individual talent into reliable victory.',
+            'The leader begins the encounter; every member completes it.',
+            'Know who can heal, defend, damage, and adapt.',
+            'Four adventurers moving as one can challenge legends.'
+        ],
+        platinum: [
+            'Platinum is not permission to rest. It is a vow to stand where others cannot.',
+            'The realm now measures danger against your name.',
+            'A hero at the highest rank becomes an example whether they wish to or not.',
+            'Ancient threats will recognize your crest.',
+            'Protect the Bronze adventurers watching you.',
+            'Your rank shines because countless duties lie beneath it.',
+            'The Guild salutes you, Platinum hero.',
+            'Now prove the title belongs to your character as much as your power.'
+        ]
+    },
+    quartermaster: {
+        greeting: [
+            'New adventurer? Fine. Starter pack on the counter. Sign twice and do not lose anything.',
+            'I issued your gear by class, size, and expected likelihood of misuse.',
+            'The pack contains essentials. The confidence is your own problem.',
+            'Inventory rules are simple: own it, track it, do not eat unidentified materials.',
+            'Your starter weapon is functional. Functional is generous at Bronze.',
+            'I have registered every item under your Discord ID. Very modern. Very irritating.',
+            'Take the potions first. Heroes always remember them after they are bleeding.',
+            'Welcome to the Guild. Please return equipment cleaner than you found it.'
+        ],
+        ambient: [
+            'Someone submitted a wet slime core without a container. I am still upset.',
+            'The inventory ledger balances, which means disaster is due any minute.',
+            'We are low on antidotes and high on adventurers who ignore poison.',
+            'I locked the Mythic shelf after the bard tried to borrow a glowing crown.',
+            'Your bag has room. That is not permission to fill it with rocks.',
+            'Monster parts belong in containers, not coat pockets.',
+            'A labeled potion is worth ten mysterious bottles.',
+            'Equipment durability exists even when adventurers pretend otherwise.'
+        ],
+        inventory: [
+            'Everything you own is sorted by type, rarity, and how likely it is to stain the counter.',
+            'Check quantities before leaving. Hope is not a stackable resource.',
+            'Weapons, armor, potions, materials, quest items—yes, I counted all of it.',
+            'Your inventory page is current as of this exact second. Try not to ruin that.',
+            'Rare items are marked clearly because apparently common sense needs color coding.',
+            'Use pagination instead of dumping the entire bag on my desk.',
+            'Stackable materials are grouped. Broken bottles are not.',
+            'If something is missing, check whether you sold it before accusing the ledger.'
+        ],
+        equipment: [
+            'Equipped items are the ones expected to take damage on your behalf.',
+            'Durability is not decorative. Repair low gear before a boss notices.',
+            'Your weapon and armor should support your class rather than your fashion crisis.',
+            'An empty slot is wasted potential and an invitation to injury.',
+            'Set bonuses reward planning. Random pieces reward optimism.',
+            'Check upgrade levels before comparing raw item names.',
+            'Accessories matter more at higher ranks.',
+            'If the armor squeaks, the blacksmith wants to see it.'
+        ],
+        equipSuccess: [
+            '{item} is equipped and entered into the active loadout.',
+            'Loadout updated. Try not to immediately replace it.',
+            'The {slot} slot now contains {item}.',
+            'Good fit. Better stats. Fewer excuses.',
+            '{item} is secured and ready for field use.',
+            'Equipment change recorded.',
+            'That item actually suits your build. I am pleasantly surprised.',
+            'Active gear updated. Durability tracking begins now.'
+        ],
+        useItem: [
+            '{item} removed from inventory and used successfully.',
+            'One {item} consumed. Quantity adjusted.',
+            'The ledger says you used it, so I hope it was worth saving.',
+            'Item use recorded. See? Supplies work better outside the bag.',
+            '{item} did its job. Remember that before the next emergency.',
+            'Inventory updated after use.',
+            'One less bottle to break in your pack.',
+            'Resource restored. Ledger satisfied.'
+        ],
+        loot: [
+            'New loot detected. I have already made room in the ledger.',
+            'Bring the drops to the counter before the slime dries.',
+            'Rare materials go in the reinforced drawer.',
+            'Individual loot means individual responsibility.',
+            'Count the parts now; arguments become louder after tavern drinks.',
+            'I will sort the useful materials from the suspiciously organic ones.',
+            'A full bag is good. A documented full bag is better.',
+            'Do not sell anything until you check the blacksmith recipes.'
+        ],
+        lowStock: [
+            'Your potion count is embarrassing.',
+            'Buy supplies before the next contract unless you enjoy avoidable suffering.',
+            'The bag has more empty slots than useful items.',
+            'You are one difficult fight away from regretting this inventory.',
+            'Stock health restoration, class resources, and status cures.',
+            'A cheap potion costs less than a failed dungeon.',
+            'The alchemist has supplies. Use them.',
+            'Preparation is lighter than carrying a defeated party member.'
+        ],
+        advice: [
+            'Repair before twenty percent durability, not after zero.',
+            'Keep at least three useful potions for serious content.',
+            'Do not sell Rare or better materials without checking recipes.',
+            'Upgrade your weapon often; enemies rarely respect sentimental equipment.',
+            'Use equipment made for your class.',
+            'Sort by purpose: fight, recover, craft, sell.',
+            'Gold in the purse does not block damage.',
+            'A spare antidote is never exciting until it becomes essential.'
+        ]
+    },
+    blacksmith: {
+        greeting: [
+            'Welcome to Emberforge. Starter steel today, dragon steel someday.',
+            'Bring me materials and Gold. I will turn them into confidence with edges.',
+            'Every legend needs a weapon. Every weapon needs someone who stops dropping it.',
+            'I know your class by the way you stare at the weapon rack.',
+            'The forge does not care about rank. It only respects good materials.',
+            'Your starter gear will do. For now.',
+            'Stand back from the sparks unless you want a very memorable haircut.',
+            'Come back after your first hunt. Monster parts make better stories when hammered flat.'
+        ],
+        ambient: [
+            'The anvil has been louder than the tavern all morning.',
+            'I can smell low durability from across the hall.',
+            'Someone tried to sharpen a staff. I sent them to the alchemist.',
+            'Dragon scale does not melt. It negotiates.',
+            'Every dent tells me exactly how badly you blocked.',
+            'The best weapon is the one maintained before battle.',
+            'I named the large hammer Diplomacy.',
+            'The forge fire burns brighter when rare materials enter the room.'
+        ],
+        forgeOpen: [
+            'Recipes are ready. Pick something worthy of the materials.',
+            'Craft, upgrade, repair—three ways to stop blaming your equipment.',
+            'Check the missing materials before asking me to perform miracles.',
+            'The forge menu is open. Try not to drool on the Legendary recipes.',
+            'Your class-compatible recipes are on the board.',
+            'Gold pays for fuel. Monster parts pay for possibilities.',
+            'I can improve what you carry or build what you deserve next.',
+            'The anvil is waiting.'
+        ],
+        craftSuccess: [
+            '{item} is finished. Listen to that balance.',
+            'The final strike lands and {item} is born.',
+            'Craft complete. That is real Guild workmanship.',
+            'I turned your materials into something monsters will remember.',
+            '{item} came out beautifully dangerous.',
+            'Sparks settle. The new gear is yours.',
+            'Another fine piece leaves my forge.',
+            'Crafting complete. Try to earn a few respectable scratches.'
+        ],
+        craftDenied: [
+            'No. A forge cannot replace missing {reason}.',
+            'Bring me what the recipe asks for: {reason}',
+            'I can work steel, bone, crystal, and scale. I cannot work excuses.',
+            'The forge is ready. Your materials are not.',
+            'Come back when you have {reason}.',
+            'A missing ingredient makes an unfinished weapon.',
+            'I will not weaken the craft by improvising the required parts.',
+            'Gather properly, then return.'
+        ],
+        upgradeSuccess: [
+            '{item} is now +{level}. The edge feels hungrier.',
+            'Upgrade complete. The weapon has more bite now.',
+            'I reinforced every weak point and improved the balance.',
+            'That equipment just became worthy of a harder contract.',
+            'The new upgrade level is locked in.',
+            'Stronger, cleaner, and less forgiving to monsters.',
+            'Another layer of craftsmanship added.',
+            'Take it. I want to hear what it does to the next boss.'
+        ],
+        repairSuccess: [
+            'Everything is restored to full durability.',
+            'Dents removed, straps replaced, edge corrected.',
+            'Your equipment can survive being mistreated again.',
+            'Repair complete. Try blocking with the shield side next time.',
+            'The gear is field-ready.',
+            'I restored every equipped piece.',
+            'Good as new, with better stories.',
+            'Full durability. No excuses left.'
+        ],
+        repairNotNeeded: [
+            'Your gear is already at full durability. Stop looking for reasons to spend Gold.',
+            'Nothing needs repair. I checked twice.',
+            'The equipment is fine. Go damage it responsibly.',
+            'Full durability across the loadout.',
+            'I appreciate the caution, but the forge has nothing to fix.',
+            'Not a scratch worth charging for.',
+            'Save the Gold for upgrades.',
+            'Come back after something actually hits you.'
+        ],
+        missingMaterials: [
+            'You are missing: {reason}',
+            'The recipe cannot begin until you bring {reason}.',
+            'Check your inventory. The forge needs {reason}.',
+            'Almost enough is still not enough.',
+            'The missing materials are the difference between equipment and expensive debris.',
+            'Gather {reason}, then I will light the forge.',
+            'I have the skill. You need the supplies.',
+            'No substitutions for this recipe.'
+        ],
+        lowDurability: [
+            'That gear will not survive another hard battle. Bring it here.',
+            'I can hear the cracks from across the hall.',
+            'Below twenty percent durability is not bravery. It is negligence.',
+            'Repair now, or carry the pieces back later.',
+            'Your equipment is begging for the forge.',
+            'One heavy attack could finish that armor.',
+            'Do not enter a boss room wearing a future pile of scrap.',
+            'Hand it over before the next contract.'
+        ]
+    },
+    alchemist: {
+        greeting: [
+            'New adventurer! You receive one professional recommendation: carry more potions than pride.',
+            'Your starter bottles are stable, labeled, and only mildly magical.',
+            'Class resources differ, but everyone benefits from not dying.',
+            'I prepared health potions and the correct resource restoration for your class.',
+            'Welcome! Please tell me immediately if your starter potion starts singing.',
+            'The Guild says I must warn you not to drink unidentified liquids.',
+            'A healthy adventurer is a repeat customer.',
+            'Your aura is new. Very sparkly.'
+        ],
+        ambient: [
+            'The blue potion tastes like blueberries because the first version tasted like lightning.',
+            'I am testing a stamina blend that does not make boots smoke.',
+            'Antidote sales rise every spider season.',
+            'The cauldron is bubbling in perfect rhythm today.',
+            'A Mage asked whether mana potions count as breakfast. Technically, no.',
+            'The Strength Potion and Intelligence Potion are no longer allowed to share a shelf.',
+            'If you hear giggling from the cabinet, do not open it.',
+            'Everything for sale has passed at least one safety test.'
+        ],
+        shopOpen: [
+            'The shelves are stocked with health, mana, stamina, cures, and confidence in bottles.',
+            'Choose by need, not by the prettiest color.',
+            'Potions are cheaper than defeat and lighter than regret.',
+            'Fresh stock! The corks are secure and the labels are mostly accurate.',
+            'I recommend carrying recovery for health and your class resource.',
+            'Status cures become valuable exactly one turn after you decide not to buy them.',
+            'The shop is open. Please keep swords away from the glassware.',
+            'Tell me what hurts, what is empty, or what monster you expect.'
+        ],
+        purchaseSuccess: [
+            '{quantity}× {item} purchased. Excellent choice.',
+            'Payment accepted and bottles packed securely.',
+            '{item} is now in your inventory. Do not forget it during battle.',
+            'Purchase complete. Your survival odds just improved.',
+            'I wrapped every bottle separately.',
+            'Supplies delivered. The quartermaster will pretend not to be impressed.',
+            'A wise investment in future breathing.',
+            'Your potion pouch looks much healthier now.'
+        ],
+        purchaseDenied: [
+            'You need more Gold for that purchase.',
+            'The potion is available. Your purse is not cooperating.',
+            'I cannot accept enthusiasm as currency.',
+            'Come back with enough Gold and I will keep the stock ready.',
+            'No credit. The last goblin promised to pay and never returned.',
+            'You are short on Gold, not charm.',
+            'Save a little more before buying that quantity.',
+            'The Guild shop ledger refuses the transaction.'
+        ],
+        potionUse: [
+            '{item} activates and restores your strength.',
+            'The potion works exactly as intended. How refreshing.',
+            'You used {item}. See? Carrying supplies was a good idea.',
+            'The bottle empties and the magic settles into place.',
+            'Recovery confirmed. Please recycle the vial.',
+            '{item} has been consumed successfully.',
+            'Your aura stabilizes after the potion takes effect.',
+            'One bottle, one problem reduced.'
+        ],
+        lowHealth: [
+            'Your health is low enough that even the red bottles look concerned.',
+            'Please use a healing potion before accepting more danger.',
+            'You are injured. I have remedies and very little patience for preventable collapse.',
+            'Health first. Heroics second.',
+            'A potion now may prevent an infirmary visit later.',
+            'Your pulse says rest. Your face says stubborn. Listen to the pulse.',
+            'I recommend immediate healing.',
+            'The Guild Hall is the safest place to recover.'
+        ],
+        lowMana: [
+            'Your mana is running dry. The blue shelf exists for a reason.',
+            'A Mage without mana is a scholar holding a stick.',
+            'Restore mana before relying on high-cost spells.',
+            'Your aura is flickering at the edges.',
+            'Mana potions are stocked by size and desperation.',
+            'Do not enter a dungeon with an empty reservoir.',
+            'The next spell may need more power than you have left.',
+            'Refill now while nothing is trying to eat you.'
+        ],
+        statusCure: [
+            'Status effects are easier to cure before they become a personality trait.',
+            'Antidotes for poison, cures for burn and freeze—read the labels.',
+            'Carry the cure that matches the monsters in your contract.',
+            'A single bottle can save several miserable turns.',
+            'Prevention is wonderful. Correct treatment is a close second.',
+            'I keep every cure near the front for urgent customers.',
+            'Do not wait until the screen is flashing red.',
+            'The right cure turns panic into inconvenience.'
+        ]
+    },
+    scout: {
+        greeting: [
+            'New adventurer. Learn the roads before you chase the monsters.',
+            'Bronze routes are marked in green. Dangerous shortcuts are marked by missing signs.',
+            'I will provide locations. You provide caution.',
+            'The Guild map is useful, but terrain changes faster than ink.',
+            'Listen to contract details. Targets leave patterns.',
+            'Your first hunts should teach observation, not merely attack timing.',
+            'Travel light enough to move and prepared enough to stop.',
+            'The city gate is safe. Everything beyond it negotiates.'
+        ],
+        ambient: [
+            'Wolf tracks crossed the northern trail before dawn.',
+            'The wind from the mountains carries ash today.',
+            'Three merchant wagons arrived late. Something blocked the eastern road.',
+            'The ravens circle the old ruins again.',
+            'Goblin campfires moved closer to the river.',
+            'A wyvern shadow passed over the western farms.',
+            'The forest is too quiet for this hour.',
+            'I found claw marks higher than my head.'
+        ],
+        contractBoard: [
+            'I confirmed the listed locations this morning.',
+            'Some targets move. The contract location is where the trail begins.',
+            'Recommended levels assume proper gear and sensible decisions.',
+            'Gathering contracts still involve monsters more often than adventurers expect.',
+            'The map markers are accurate within one bad surprise.',
+            'Check the target and location before choosing supplies.',
+            'Boss routes require more preparation and fewer speeches.',
+            'I added fresh notes to every active region.'
+        ],
+        targetLocated: [
+            'Your target was last seen near {location}.',
+            'Fresh signs point toward {location}.',
+            'The trail begins at {location}; expect movement beyond the marker.',
+            'Scouts confirmed activity around {location}.',
+            'Travel to {location} and look for disturbed ground.',
+            'The target is using {location} as hunting territory.',
+            'I marked the safest approach to {location}.',
+            'Weather may obscure tracks near {location}, so move quickly.'
+        ],
+        huntStart: [
+            'The trail is fresh. Move before the target changes direction.',
+            'Stay downwind and watch the brush.',
+            'Your contract seal matches the tracks ahead.',
+            'The target is close enough that the birds have stopped singing.',
+            'Do not charge the first shadow you see.',
+            'I found a clean approach. Use it.',
+            'Weapons ready. The hunt begins now.',
+            'Follow the broken branches and listen for movement.'
+        ],
+        dungeonEntry: [
+            'The entrance is stable. What waits inside is not.',
+            'Five chambers. Conserve resources for the final door.',
+            'The route map ends after the first major collapse.',
+            'Mark your path so retreat remains possible.',
+            'Dungeon air changes before traps activate.',
+            'Keep the party close through narrow passages.',
+            'The final chamber carries the strongest scent of danger.',
+            'Difficulty changes enemy strength, not dungeon patience.'
+        ],
+        bossLocated: [
+            '{enemy} has been sighted near {location}.',
+            'The boss territory begins where ordinary tracks disappear.',
+            'I found signs of a large target and several smaller creatures fleeing it.',
+            'Expect the enemy to change behavior as it weakens.',
+            'The route is marked, but the final approach offers little cover.',
+            'A boss knows when it is being hunted.',
+            'Do not enter the territory without a retreat plan.',
+            'The target is waiting, whether it knows your name or not.'
+        ],
+        danger: [
+            'Something ahead wants you to believe the road is clear.',
+            'The wind changed. Prepare for contact.',
+            'Heavy tracks overlap your route.',
+            'I would draw a weapon now.',
+            'The silence is wrong.',
+            'Movement on the ridge.',
+            'The target may be circling behind you.',
+            'Take cover before checking the map.'
+        ],
+        return: [
+            'You returned before the trail cooled. Good.',
+            'I saw the Guild seal flash from the ridge.',
+            'The road behind you is clear for now.',
+            'Your report matches the signs I found.',
+            'The target will not trouble that route again.',
+            'You brought back useful information with the victory.',
+            'Rest before the next trail.',
+            'I will update the map with what you learned.'
+        ]
+    },
+    bard: {
+        greeting: [
+            'A new adventurer! Wonderful. Please choose a class with a name that fits into a chorus.',
+            'Your legend begins today, and I have already reserved the dramatic key change.',
+            'Bronze rank is humble, but every epic needs an opening verse.',
+            'Smile for the imaginary audience.',
+            'The Guild has a new hero and the tavern has a new topic.',
+            'Do something brave soon; I dislike writing songs about paperwork.',
+            'I predict danger, triumph, and at least one badly timed potion.',
+            'Welcome! Your life now has background music.'
+        ],
+        ambient: [
+            'The tavern insists the Forest Troll is afraid of accordions. I am willing to test this.',
+            'Someone polished the Platinum trophy. Suspicious behavior.',
+            'The receptionist rejected my request to rename Emergency Contracts as Surprise Adventures.',
+            'The blacksmith says my sword technique is offensive to swords.',
+            'The alchemist created a potion that improves singing. The Guild Master confiscated it.',
+            'A Bronze adventurer claimed to see a dragon. It was a large curtain.',
+            'The scout returned with no story, so I invented three.',
+            'Rumor says the Ancient Dragon snores loudly enough to cause earthquakes.',
+            'The quartermaster has started charging me for broken lute strings.',
+            'Tonight I debut The Ballad of the Adventurer Who Actually Bought Antidotes.'
+        ],
+        guildRumor: [
+            'Rumor says the contract board hides one assignment that only appears for the truly prepared.',
+            'The tavern is betting on which adventurer reaches the next rank first.',
+            'A merchant brought crystal fragments from a dungeon no map currently lists.',
+            'The Guild Master smiled once this week. Witnesses remain uncertain.',
+            'The receptionist keeps a private list of adventurers who follow instructions.',
+            'The forge produced sparks shaped like a dragon last night.',
+            'Scouts heard singing beneath the haunted catacombs.',
+            'A Mythic material changed shelves while nobody was looking.'
+        ],
+        profile: [
+            'Your profile reads like the first half of an excellent ballad.',
+            'Level, rank, title, equipment—very heroic. The empty potion slots are less poetic.',
+            'Your active contract gives the story direction.',
+            'That title will sound wonderful when shouted by a tavern crowd.',
+            'The Guild record is factual. My version will be more flattering.',
+            'Your progress bar is practically dramatic tension.',
+            'A stronger weapon would improve both combat and visual storytelling.',
+            'Every statistic is a verse waiting for a battle.'
+        ],
+        achievement: [
+            'Achievement unlocked! I am adding percussion.',
+            'The Guild archive records the deed; the tavern will exaggerate it by sunset.',
+            'A fine accomplishment deserves a louder announcement.',
+            'You earned that one without bribing the historian. Impressive.',
+            'Another line added to your legend.',
+            'The trophy hall has fresh gossip now.',
+            'Your name just became easier to rhyme with victory.',
+            'Celebrate properly. The next achievement is already jealous.'
+        ],
+        leaderboard: [
+            'Behold the server heroes, ranked by numbers and tavern arguments.',
+            'The leaderboard never lies, though it occasionally ruins friendships.',
+            'These names currently dominate the Guild stories.',
+            'Someone below you is training. Someone above you is nervous.',
+            'Rankings change whenever a determined adventurer refuses to sleep.',
+            'Gold, reputation, victories—every category tells a different legend.',
+            'The top three receive medals. Everyone else receives motivation.',
+            'Today’s champions are tomorrow’s dramatic rivals.'
+        ],
+        victory: [
+            'Victory! Hold the pose while I remember the heroic version.',
+            'The enemy falls, the music swells, and nobody mentions the panic halfway through.',
+            'A magnificent ending to this battle.',
+            'That critical hit deserves its own refrain.',
+            'The Guild will hear of this before you reach the gate.',
+            'Loot, applause, and a tasteful amount of exaggeration.',
+            'Your legend just became louder.',
+            'I knew the chorus needed a victory fanfare.'
+        ],
+        defeat: [
+            'A temporary setback. Tragic second verses make final victories sweeter.',
+            'The song is not over merely because this stanza hurt.',
+            'Recover, return, and give me a better ending.',
+            'Even legendary heroes occasionally become educational examples.',
+            'The tavern will hear the tasteful version.',
+            'Defeat provides character development, unfortunately.',
+            'Rest now. Revenge later. Rhyming optional.',
+            'I refuse to end your ballad here.'
+        ],
+        titleEquip: [
+            'That title has excellent rhythm.',
+            'A fine choice. I will announce it with unnecessary volume.',
+            'The new title suits your current chapter.',
+            'Wear it proudly until you unlock something even more dramatic.',
+            'The tavern crowd will remember that one.',
+            'Your introduction just became longer and therefore better.',
+            'Title equipped. Trumpets are pending.',
+            'I approve completely, which is obviously the highest honor.'
+        ],
+        party: [
+            'Four adventurers, one party, and at least six conflicting plans.',
+            'A party makes every victory louder and every mistake witnessed.',
+            'Choose companions with complementary skills and compatible dramatic timing.',
+            'Shared experience, individual loot, collective blame.',
+            'The best parties move like choreography.',
+            'Someone should lead, someone should defend, and someone should remember potions.',
+            'A group adventure gives me multiple perspectives to misquote.',
+            'Invite carefully. Legends travel faster in company.'
+        ]
+    }
+};
+
+const rpgNpcDialogueHistory = new Map();
+
+function getRpgNpcProfile(npcId) {
+    return RPG_NPC_PROFILES[npcId] || RPG_NPC_PROFILES.receptionist;
+}
+
+function getRpgNpcContext(player = null, context = {}) {
+    const activeContract = player?.activeContract || {};
+    return {
+        adventurer: context.adventurer || player?.username || 'adventurer',
+        rank: context.rank || (player ? `${getRpgRankEmoji(player.guildRank)} ${player.guildRank}` : 'Bronze'),
+        className: context.className || player?.className || 'adventurer',
+        level: context.level ?? player?.level ?? 1,
+        gold: context.gold ?? player?.gold ?? 0,
+        contract: context.contract || activeContract.name || 'your contract',
+        location: context.location || activeContract.location || 'the marked location',
+        item: context.item || 'the item',
+        quantity: context.quantity ?? 1,
+        reason: context.reason || 'the requirements are not satisfied',
+        mission: context.mission || 'guild',
+        enemy: context.enemy || 'the target',
+        dungeon: context.dungeon || 'the dungeon',
+        title: context.title || player?.equippedTitle || 'Rookie Adventurer',
+        slot: context.slot || 'equipment',
+        levelValue: context.levelValue ?? context.level ?? 1,
+        ...context
+    };
+}
+
+function renderRpgNpcTemplate(template, player = null, context = {}) {
+    const values = getRpgNpcContext(player, context);
+    return String(template || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => String(values[key] ?? ''));
+}
+
+function pickRpgNpcTemplate(npcId, event, player = null, context = {}) {
+    const dialogue = RPG_NPC_DIALOGUE[npcId] || {};
+    const values = dialogue[event] || dialogue.ambient || dialogue.greeting || ['The Guild is listening.'];
+    const identity = player?.userId || context.userId || player?.username || context.adventurer || 'global';
+    const guildId = player?.guildId || context.guildId || 'global';
+    const historyKey = `${guildId}:${identity}:${npcId}:${event}`;
+    const priorState = rpgNpcDialogueHistory.get(historyKey) || {
+        remaining: [],
+        lastIndex: null
+    };
+    let remaining = Array.isArray(priorState.remaining)
+        ? [...priorState.remaining]
+        : [];
+
+    if (remaining.length === 0) {
+        remaining = values.map((_, index) => index);
+
+        for (let index = remaining.length - 1; index > 0; index--) {
+            const swapIndex = Math.floor(Math.random() * (index + 1));
+            [remaining[index], remaining[swapIndex]] = [remaining[swapIndex], remaining[index]];
+        }
+
+        if (
+            remaining.length > 1 &&
+            priorState.lastIndex !== null &&
+            remaining[remaining.length - 1] === priorState.lastIndex
+        ) {
+            [remaining[0], remaining[remaining.length - 1]] = [
+                remaining[remaining.length - 1],
+                remaining[0]
+            ];
+        }
+    }
+
+    const index = remaining.pop() ?? 0;
+    rpgNpcDialogueHistory.set(historyKey, {
+        remaining,
+        lastIndex: index
+    });
+
+    return renderRpgNpcTemplate(values[index], player, context);
+}
+
+function getRpgNpcLine(npcId, event = 'ambient', player = null, context = {}) {
+    const profile = getRpgNpcProfile(npcId);
+    const line = pickRpgNpcTemplate(npcId, event, player, context);
+    return `${profile.emoji} **${profile.name} · ${profile.title}:** “${line}”`;
+}
+
+function getRpgReceptionistDialogue(event, context = {}, player = null) {
+    return getRpgNpcLine('receptionist', event, player, context);
+}
+
+function getRpgGuildAmbientLine(player) {
+    const options = [
+        ['receptionist', 'ambient'],
+        ['guildMaster', 'ambient'],
+        ['quartermaster', 'ambient'],
+        ['blacksmith', 'ambient'],
+        ['alchemist', 'ambient'],
+        ['scout', 'ambient'],
+        ['bard', 'guildRumor']
+    ];
+    const [npcId, event] = options[Math.floor(Math.random() * options.length)];
+    return getRpgNpcLine(npcId, event, player);
+}
+
+function buildRpgNpcRosterEmbed(player) {
+    const lines = Object.entries(RPG_NPC_PROFILES).map(([npcId, profile]) =>
+        `${profile.emoji} **${profile.name}** · *${profile.title}*\n└ ${profile.personality}`
+    );
+    return new EmbedBuilder()
+        .setColor('#6C3483')
+        .setTitle('🏰💬 Adventurer Guild Staff')
+        .setDescription(`The Guild is filled with recurring characters who react to your progress, condition, contracts, purchases, victories, and mistakes.\n\n${lines.join('\n\n')}`.slice(0, 4096))
+        .addFields({
+            name: '🗣️ Talk to the Staff',
+            value: 'Use the dropdown below or `!guildstaff npc-name`. Dialogue rotates with anti-repeat tracking, context, and each NPC’s personality.',
+            inline: false
+        })
+        .setFooter({ text: 'Examples: !guildstaff receptionist · !guildstaff scout · !guildstaff bard' })
+        .setTimestamp();
+}
+
+function buildRpgNpcSelectRow(player) {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`rpg_npc:${player.guildId}:${player.userId}`)
+            .setPlaceholder('💬 Choose a Guild staff member to speak with')
+            .addOptions(...Object.entries(RPG_NPC_PROFILES).map(([npcId, profile]) =>
+                new StringSelectMenuOptionBuilder()
+                    .setLabel(profile.name.slice(0, 100))
+                    .setDescription(profile.title.slice(0, 100))
+                    .setEmoji(profile.emoji)
+                    .setValue(npcId)
+            ))
+    );
+}
+
+function buildRpgNpcConversationEmbed(player, npcId) {
+    const profile = getRpgNpcProfile(npcId);
+    const contextEvent = npcId === 'receptionist'
+        ? (player.activeContract ? 'profile' : 'contractsWaiting')
+        : npcId === 'guildMaster'
+            ? (player.statPoints > 0 || player.skillPoints > 0 ? 'training' : 'ambient')
+            : npcId === 'quartermaster'
+                ? 'inventory'
+                : npcId === 'blacksmith'
+                    ? (getRpgReadiness(player).label === 'Gear at Risk' ? 'lowDurability' : 'forgeOpen')
+                    : npcId === 'alchemist'
+                        ? (getRpgReadiness(player).label === 'Needs Recovery' ? 'lowHealth' : 'shopOpen')
+                        : npcId === 'scout'
+                            ? (player.activeContract ? 'targetLocated' : 'contractBoard')
+                            : 'guildRumor';
+    return new EmbedBuilder()
+        .setColor(profile.color)
+        .setTitle(`${profile.emoji} ${profile.name}`)
+        .setDescription(`*${profile.title}*\n\n**Personality:** ${profile.personality}`)
+        .addFields(
+            { name: '👋 Greeting', value: getRpgNpcLine(npcId, 'greeting', player), inline: false },
+            { name: '💬 Current Comment', value: getRpgNpcLine(npcId, contextEvent, player, {
+                location: player.activeContract?.location,
+                contract: player.activeContract?.name
+            }), inline: false },
+            { name: '🏰 Guild Chatter', value: getRpgNpcLine(npcId, 'ambient', player), inline: false }
+        )
+        .setFooter({ text: 'Select the same NPC again for fresh dialogue.' })
+        .setTimestamp();
+}
+
+async function handleRpgGuildStaffCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const query = args.join(' ').trim().toLowerCase();
+    const npcId = query
+        ? Object.keys(RPG_NPC_PROFILES).find(id => {
+            const profile = RPG_NPC_PROFILES[id];
+            return id === query.replace(/\s+/g, '') ||
+                profile.name.toLowerCase() === query ||
+                profile.title.toLowerCase() === query ||
+                profile.name.toLowerCase().includes(query) ||
+                profile.title.toLowerCase().includes(query);
+        })
+        : null;
+    if (query && !npcId) {
+        return message.reply(`💬 Guild staff: ${Object.values(RPG_NPC_PROFILES).map(profile => `${profile.emoji} ${profile.name}`).join(' · ')}`);
+    }
+    if (npcId) {
+        return message.channel.send({
+            embeds: [buildRpgNpcConversationEmbed(player, npcId)],
+            components: [buildRpgNpcSelectRow(player), buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)]
+        });
+    }
+    await message.channel.send({
+        embeds: [buildRpgNpcRosterEmbed(player)],
+        components: [buildRpgNpcSelectRow(player), buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)]
+    });
+}
+
+
+function pickRpgFlavor(category) {
+    const values = RPG_FLAVOR_LINES[category] || [];
+    return values.length ? values[Math.floor(Math.random() * values.length)] : '';
+}
+
+function getRpgHealthMood(current, maximum) {
+    const ratio = Math.max(0, Math.min(1, Number(current || 0) / Math.max(1, Number(maximum || 1))));
+    if (ratio <= 0) return { emoji: '💀', label: 'Defeated', color: '#2C3E50' };
+    if (ratio <= 0.25) return { emoji: '🆘', label: 'Critical', color: '#C0392B' };
+    if (ratio <= 0.5) return { emoji: '🩹', label: 'Wounded', color: '#E67E22' };
+    if (ratio <= 0.8) return { emoji: '❤️‍🩹', label: 'Ready', color: '#F1C40F' };
+    return { emoji: '💖', label: 'Excellent', color: '#2ECC71' };
+}
+
+function getRpgReadiness(player) {
+    const derived = getRpgDerivedStats(player);
+    const health = getRpgHealthMood(player.currentHp, derived.maxHp);
+    const weaponId = player.equipment?.weapon;
+    const armorId = player.equipment?.armor;
+    const lowestDurability = Math.min(
+        weaponId ? Number(player.gearDurability?.[weaponId] ?? 100) : 100,
+        armorId ? Number(player.gearDurability?.[armorId] ?? 100) : 100
+    );
+    if (player.activeBattle) return { emoji: '⚔️', label: 'In Battle', detail: 'An encounter is already underway.' };
+    if (health.label === 'Critical') return { emoji: '🏥', label: 'Needs Recovery', detail: 'Visit your inventory and use a health potion.' };
+    if (lowestDurability <= 20) return { emoji: '🔨', label: 'Gear at Risk', detail: 'Repair your equipment before a difficult fight.' };
+    if (!player.activeContract) return { emoji: '📜', label: 'Awaiting Contract', detail: 'Choose an assignment from the guild board.' };
+    return { emoji: '🟢', label: 'Adventure Ready', detail: 'Your contract, health, and equipment are ready.' };
+}
+
+function getRpgGuildNpcLine(player) {
+    const readiness = getRpgReadiness(player);
+    if (readiness.label === 'Needs Recovery') {
+        return getRpgNpcLine('receptionist', 'recovery', player);
+    }
+    if (readiness.label === 'Gear at Risk') {
+        return getRpgNpcLine('blacksmith', 'lowDurability', player);
+    }
+    if (!player.activeContract) {
+        return getRpgNpcLine('receptionist', 'contractsWaiting', player, {
+            rank: `${getRpgRankEmoji(player.guildRank)} ${player.guildRank}`
+        });
+    }
+    if (player.statPoints > 0 || player.skillPoints > 0) {
+        return getRpgNpcLine('guildMaster', 'training', player);
+    }
+    const activeOptions = [
+        ['scout', 'targetLocated', { location: player.activeContract.location }],
+        ['receptionist', 'profile', {}],
+        ['quartermaster', 'advice', {}],
+        ['alchemist', player.className === 'Mage' && player.currentMana < getRpgDerivedStats(player).maxMana * 0.35 ? 'lowMana' : 'ambient', {}],
+        ['bard', 'guildRumor', {}]
+    ];
+    const [npcId, event, context] = activeOptions[Math.floor(Math.random() * activeOptions.length)];
+    return getRpgNpcLine(npcId, event, player, context);
+}
+
+function getRpgActivityStreakEmoji(days) {
+    if (days >= 30) return '🌋';
+    if (days >= 14) return '🔥';
+    if (days >= 7) return '♨️';
+    if (days >= 3) return '✨';
+    return '🕯️';
+}
+
+function touchRpgPlayer(player, action = 'adventure') {
+    if (!player) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    if (player.lastActiveDate !== today) {
+        player.activityStreak = player.lastActiveDate === yesterday ? Math.max(1, Number(player.activityStreak || 0) + 1) : 1;
+        player.lastActiveDate = today;
+    }
+    player.lastRpgAction = action;
+    player.lastSeenAt = new Date().toISOString();
+}
+
+function getRpgEnemyAttackNames(enemy) {
+    const attacks = {
+        forest_wolf: ['Savage Bite', 'Rending Claw'], slime: ['Acid Splash', 'Body Slam'], goblin: ['Rusty Slash', 'Cheap Shot'],
+        cave_bat: ['Echo Screech', 'Razor Wing'], armored_goblin: ['Shield Bash', 'Jagged Spear'], giant_spider: ['Venom Fang', 'Silk Snare'],
+        bandit: ['Ambush Cut', 'Smoke Bomb'], forest_troll: ['Tree-Trunk Smash', 'Ground Pound'], orc_warrior: ['War Axe', 'Battle Roar'],
+        basilisk: ['Petrifying Glare', 'Venom Tail'], ogre_brute: ['Crushing Fist', 'Boulder Swing'], shadow_beast: ['Umbral Claw', 'Night Pounce'],
+        wyvern: ['Talon Dive', 'Gale Breath'], necromancer_apprentice: ['Soul Bolt', 'Grave Curse'], lesser_dragon: ['Flame Breath', 'Wing Slash'],
+        ancient_construct: ['Rune Slam', 'Ancient Beam'], frost_giant: ['Glacial Hammer', 'Frozen Roar'], sky_guardian: ['Sky Lance', 'Judgment Gale'],
+        demon_general: ['Hellblade', 'Abyssal Command'], ancient_dragon: ['Tail Swipe', 'Fire Breath', 'Wing Gust', 'Meteor Rain']
+    };
+    return attacks[enemy.id] || ['Savage Strike', 'Heavy Attack'];
+}
+
+function rollRpgEnemyIntent(enemy) {
+    const names = getRpgEnemyAttackNames(enemy);
+    let name = names[Math.floor(Math.random() * names.length)];
+    if (enemy.id === 'ancient_dragon' && enemy.phase >= 3 && Math.random() < 0.45) name = 'Meteor Rain';
+    const area = ['Meteor Rain', 'Wing Gust', 'Ground Pound', 'Quake', 'Frozen Roar'].includes(name);
+    const heavy = /Crushing|Heavy|Hammer|Slam|Boulder|Meteor|Fire Breath|Hellblade|Tree-Trunk/i.test(name);
+    const status = /Venom|Poison|Curse|Frozen|Glare|Acid|Silk|Screech/i.test(name);
+    return {
+        name,
+        emoji: area ? '🌪️' : status ? (enemy.status ? getRpgStatusEmoji(enemy.status) : '🌀') : heavy ? '💥' : '⚔️',
+        hint: area ? 'Targets the whole party' : status ? 'May inflict a status effect' : heavy ? 'High damage—Defend recommended' : 'A direct attack is coming',
+        multiplier: area ? 0.65 : heavy ? 1.25 : 1,
+        area,
+        statusBoost: status ? 0.35 : 0.22
+    };
+}
+
+function getRpgBattleMomentum(battle) {
+    const value = Math.max(0, Math.min(10, Number(battle?.momentum || 0)));
+    return {
+        value,
+        emoji: value >= 8 ? '🔥' : value >= 5 ? '⚡' : value >= 2 ? '✨' : '🗡️',
+        multiplier: 1 + value * 0.02
+    };
+}
+
+function triggerRpgBattleEvent(battle) {
+    if (!battle || battle.turn < 2 || battle.lastEventTurn === battle.turn || Math.random() >= 0.18) return;
+    battle.lastEventTurn = battle.turn;
+    const aliveIds = battle.participants.filter(userId => battle.participantStates[userId]?.hp > 0);
+    if (!aliveIds.length) return;
+    const event = Math.floor(Math.random() * 5);
+    if (event === 0) {
+        battle.enemy.statuses.push({ name: 'Defense Down', turns: 2, power: 0 });
+        battle.log.push(`${RPG_EMOJIS.events.opening} **Battlefield opening!** The enemy loses footing and suffers ${getRpgStatusEmoji('Defense Down')} **Defense Down**.`);
+    } else if (event === 1) {
+        for (const userId of aliveIds) {
+            const player = getRpgPlayer(battle.guildId, userId);
+            const state = battle.participantStates[userId];
+            const derived = getRpgDerivedStats(player);
+            const heal = Math.max(3, Math.round(derived.maxHp * 0.06));
+            state.hp = Math.min(derived.maxHp, state.hp + heal);
+        }
+        battle.log.push(`${RPG_EMOJIS.events.healingWind} **A healing wind crosses the field!** Every adventurer recovers a little HP.`);
+    } else if (event === 2) {
+        battle.momentum = Math.min(10, Number(battle.momentum || 0) + 2);
+        battle.log.push(`${RPG_EMOJIS.events.rally} **Guild rally!** A distant horn raises party momentum.`);
+    } else if (event === 3) {
+        const damage = Math.max(2, Math.round(battle.enemy.maxHp * 0.03));
+        battle.enemy.hp = Math.max(0, battle.enemy.hp - damage);
+        battle.log.push(`${RPG_EMOJIS.events.fallingRocks} **The terrain shifts!** Falling debris deals **${damage}** damage to ${getRpgEnemyEmoji(battle.enemy)} ${battle.enemy.name}.`);
+    } else {
+        for (const userId of aliveIds) {
+            const player = getRpgPlayer(battle.guildId, userId);
+            const state = battle.participantStates[userId];
+            const derived = getRpgDerivedStats(player);
+            const resourceKey = player.className === 'Mage' ? 'mana' : 'stamina';
+            const maximum = player.className === 'Mage' ? derived.maxMana : derived.maxStamina;
+            state[resourceKey] = Math.min(maximum, state[resourceKey] + Math.max(4, Math.round(maximum * 0.08)));
+        }
+        battle.log.push(`${RPG_EMOJIS.events.blessing} **The guild crest resonates!** Party resources recover slightly.`);
+    }
+}
+
+function getRpgRankEmoji(rank) {
+    return RPG_EMOJIS.ranks[rank] || '🏰';
+}
+
+function getRpgRarityEmoji(rarity) {
+    return RPG_EMOJIS.rarities[rarity] || '⚪';
+}
+
+function getRpgStatusEmoji(statusName) {
+    return RPG_EMOJIS.statuses[statusName] || '✨';
+}
+
+function getRpgContractEmoji(type) {
+    return RPG_EMOJIS.contractTypes[type] || '📜';
+}
+
+function getRpgDifficultyEmoji(difficulty) {
+    return RPG_EMOJIS.difficulties[difficulty] || '⚔️';
+}
+
+function getRpgEnemyEmoji(enemyOrId) {
+    const id = typeof enemyOrId === 'string' ? enemyOrId : enemyOrId?.id;
+    if (RPG_EMOJIS.enemies[id]) return RPG_EMOJIS.enemies[id];
+    if (enemyOrId?.dragon) return '🐉';
+    if (enemyOrId?.boss) return '👑';
+    return '👾';
+}
+
+function getRpgDungeonEmoji(dungeonId) {
+    return RPG_EMOJIS.dungeons[dungeonId] || '🏰';
+}
+
+function getRpgSkillEmoji(skillOrId) {
+    const id = String(typeof skillOrId === 'string' ? skillOrId : skillOrId?.id || '').toLowerCase();
+    if (/fire|flame|meteor/.test(id)) return '🔥';
+    if (/ice|freeze|blizzard|frost/.test(id)) return '❄️';
+    if (/spark|lightning|storm|shock/.test(id)) return '⚡';
+    if (/stone|earth|quake/.test(id)) return '🪨';
+    if (/wind|tornado/.test(id)) return '🌪️';
+    if (/heal|holy|radiant/.test(id)) return '✨';
+    if (/shadow|curse|drain/.test(id)) return '🌑';
+    if (/mana|arcane|magic|blink/.test(id)) return '🔮';
+    if (/poison/.test(id)) return '☠️';
+    if (/guard|armor|barrier|shield/.test(id)) return '🛡️';
+    if (/dash|step|lunge|haste/.test(id)) return '💨';
+    if (/fang/.test(id)) return '🐺';
+    if (/crushing|splitter|titan/.test(id)) return '💥';
+    return '⚔️';
+}
+
+function getRpgItemEmoji(itemId, item = RPG_ITEMS?.[itemId]) {
+    const id = String(itemId || '').toLowerCase();
+    const name = String(item?.name || '').toLowerCase();
+    if (/health_potion/.test(id)) return '❤️';
+    if (/mana_potion/.test(id)) return '💙';
+    if (/stamina_potion/.test(id)) return '⚡';
+    if (/antidote/.test(id)) return '💚';
+    if (/burn_cure/.test(id)) return '🔥';
+    if (/freeze_cure/.test(id)) return '❄️';
+    if (/strength_potion/.test(id)) return '💪';
+    if (/intelligence_potion/.test(id)) return '🧠';
+    if (/defense_potion/.test(id)) return '🛡️';
+    if (/dagger/.test(id + name)) return '🗡️';
+    if (/rapier/.test(id + name)) return '🤺';
+    if (/cleaver/.test(id + name)) return '🪓';
+    if (/sword|blade/.test(id + name)) return '⚔️';
+    if (/staff|wand/.test(id + name)) return '🪄';
+    if (/leather/.test(id)) return '🥋';
+    if (/iron_guard/.test(id)) return '🛡️';
+    if (/wolf_hunter/.test(id)) return '🐺';
+    if (/goblin_slayer/.test(id)) return '👺';
+    if (/orc_warrior/.test(id)) return '👹';
+    if (/crystal_mage/.test(id)) return '💎';
+    if (/shadow_hunter/.test(id)) return '🌑';
+    if (/wyvern_scale/.test(id)) return '🐲';
+    if (/dragon_scale_set/.test(id)) return '🐉';
+    if (/platinum_hero/.test(id)) return '👑';
+    const exact = {
+        wolf_fang: '🦷', wolf_pelt: '🐺', slime_core: '🟢', goblin_ear: '👂', goblin_dagger: '🗡️',
+        spider_fang: '🕷️', spider_silk: '🕸️', orc_tusk: '🦷', troll_bone: '🦴', ogre_horn: '🦏',
+        basilisk_scale: '🐍', shadow_core: '🌑', wyvern_claw: '🐲', dragon_scale: '🐉', dragon_fang: '🦷',
+        ancient_dragon_heart: '❤️‍🔥', ancient_core: '🔷', special_token: '🎟️'
+    };
+    return exact[id] || ({ weapon: '⚔️', armor: '🛡️', accessory: '💍', potion: '🧪', part: '🦴', material: '🧱' }[item?.type] || '📦');
+}
+
+function formatRpgItem(itemId, quantity = null) {
+    const item = RPG_ITEMS[itemId];
+    if (!item) return `📦 ${itemId}`;
+    const quantityText = quantity === null ? '' : ` ×${quantity}`;
+    return `${getRpgItemEmoji(itemId, item)} **${item.name}**${quantityText}`;
+}
+
+function buildRpgProgressBar(current, maximum, width = 12) {
+    const max = Math.max(1, Number(maximum) || 1);
+    const ratio = Math.max(0, Math.min(1, (Number(current) || 0) / max));
+    const filled = Math.round(ratio * width);
+    return `${'▰'.repeat(filled)}${'▱'.repeat(width - filled)}`;
+}
+
+function formatRpgStatusList(statuses = []) {
+    return statuses.length
+        ? statuses.map(status => `${getRpgStatusEmoji(status.name)} **${status.name}** · ${status.turns} turn${status.turns === 1 ? '' : 's'}`).join('\n')
+        : '✨ None';
+}
+
+function getRpgContextTip(player) {
+    if (!player.activeContract) return '📜 Tip: Visit !contracts and accept a contract before hunting.';
+    if (player.currentHp < getRpgDerivedStats(player).maxHp * 0.4) return '❤️ Tip: Recover with !inventory use small_health_potion before your next fight.';
+    if (player.statPoints > 0) return `📊 Tip: You have ${player.statPoints} unspent stat point(s). Use !stats.`;
+    if (player.skillPoints > 0) return `✨ Tip: You have ${player.skillPoints} unspent skill point(s). Use !skills.`;
+    return '🏰 Tip: Daily missions, parties, crafting, and rank promotions all accelerate your adventure.';
+}
+
+const RPG_CLASS_DATA = {
+    Swordsman: {
+        emoji: '⚔️',
+        resource: 'stamina',
+        paths: ['Daggers', 'Rapiers', 'One-handed Swords', 'Heavy Two-handed Swords'],
+        baseStats: { strength: 6, intelligence: 1, defense: 5, health: 6, agility: 4, stamina: 6 },
+        starterWeapon: 'iron_dagger',
+        skills: [
+            { id: 'quick_slash', name: 'Quick Slash', level: 1, cost: 8, power: 1.35 },
+            { id: 'backstep', name: 'Backstep', level: 2, cost: 7, power: 0.75, effect: 'Haste' },
+            { id: 'poison_edge', name: 'Poison Edge', level: 3, cost: 10, power: 1.15, effect: 'Poison' },
+            { id: 'shadow_dash', name: 'Shadow Dash', level: 5, cost: 13, power: 1.6 },
+            { id: 'twin_fang_combo', name: 'Twin Fang Combo', level: 7, cost: 16, power: 1.9, effect: 'Bleed' },
+            { id: 'piercing_thrust', name: 'Piercing Thrust', level: 9, cost: 18, power: 2.1 },
+            { id: 'counter_step', name: 'Counter Step', level: 11, cost: 15, power: 1.4, effect: 'Defense Buff' },
+            { id: 'weak_point_strike', name: 'Weak Point Strike', level: 13, cost: 20, power: 2.4 },
+            { id: 'flash_lunge', name: 'Flash Lunge', level: 15, cost: 22, power: 2.6, effect: 'Stun' },
+            { id: 'cross_slash', name: 'Cross Slash', level: 18, cost: 24, power: 2.9, effect: 'Bleed' },
+            { id: 'guard_break', name: 'Guard Break', level: 21, cost: 24, power: 2.5, effect: 'Defense Down' },
+            { id: 'rising_blade', name: 'Rising Blade', level: 24, cost: 27, power: 3.2 },
+            { id: 'blade_storm', name: 'Blade Storm', level: 28, cost: 32, power: 3.8, effect: 'Bleed' },
+            { id: 'crushing_swing', name: 'Crushing Swing', level: 32, cost: 34, power: 4.1 },
+            { id: 'earth_splitter', name: 'Earth Splitter', level: 36, cost: 38, power: 4.6, effect: 'Stun' },
+            { id: 'armor_break', name: 'Armor Break', level: 41, cost: 40, power: 4.8, effect: 'Defense Down' },
+            { id: 'titan_cleave', name: 'Titan Cleave', level: 48, cost: 48, power: 5.8, effect: 'Bleed' }
+        ]
+    },
+    Mage: {
+        emoji: '🔮',
+        resource: 'mana',
+        paths: ['Fire', 'Ice', 'Lightning', 'Earth', 'Wind', 'Light', 'Dark', 'Arcane'],
+        baseStats: { strength: 1, intelligence: 7, defense: 3, health: 4, agility: 3, stamina: 2 },
+        starterWeapon: 'apprentice_staff',
+        skills: [
+            { id: 'fireball', name: 'Fireball', level: 1, cost: 9, power: 1.4, effect: 'Burn' },
+            { id: 'flame_burst', name: 'Flame Burst', level: 3, cost: 13, power: 1.8, effect: 'Burn' },
+            { id: 'meteor_strike', name: 'Meteor Strike', level: 25, cost: 40, power: 4.7, effect: 'Burn' },
+            { id: 'ice_shard', name: 'Ice Shard', level: 2, cost: 8, power: 1.25 },
+            { id: 'freeze', name: 'Freeze', level: 7, cost: 16, power: 1.2, effect: 'Freeze' },
+            { id: 'blizzard', name: 'Blizzard', level: 28, cost: 42, power: 4.4, effect: 'Freeze' },
+            { id: 'spark_bolt', name: 'Spark Bolt', level: 4, cost: 11, power: 1.55, effect: 'Shock' },
+            { id: 'chain_lightning', name: 'Chain Lightning', level: 13, cost: 24, power: 2.7, effect: 'Shock' },
+            { id: 'storm_call', name: 'Storm Call', level: 34, cost: 46, power: 4.9, effect: 'Stun' },
+            { id: 'stone_spike', name: 'Stone Spike', level: 5, cost: 12, power: 1.65 },
+            { id: 'earth_armor', name: 'Earth Armor', level: 10, cost: 18, power: 0.6, effect: 'Defense Buff' },
+            { id: 'quake', name: 'Quake', level: 31, cost: 44, power: 4.5, effect: 'Stun' },
+            { id: 'wind_blade', name: 'Wind Blade', level: 6, cost: 13, power: 1.75, effect: 'Haste' },
+            { id: 'tornado', name: 'Tornado', level: 30, cost: 43, power: 4.3 },
+            { id: 'heal', name: 'Heal', level: 8, cost: 18, power: 0, effect: 'Heal' },
+            { id: 'holy_shield', name: 'Holy Shield', level: 12, cost: 22, power: 0, effect: 'Shielded' },
+            { id: 'radiant_beam', name: 'Radiant Beam', level: 20, cost: 31, power: 3.4 },
+            { id: 'shadow_bolt', name: 'Shadow Bolt', level: 9, cost: 17, power: 2.0, effect: 'Curse' },
+            { id: 'curse', name: 'Curse', level: 16, cost: 26, power: 1.8, effect: 'Curse' },
+            { id: 'life_drain', name: 'Life Drain', level: 23, cost: 34, power: 3.0, effect: 'Drain' },
+            { id: 'mana_burst', name: 'Mana Burst', level: 14, cost: 25, power: 2.8 },
+            { id: 'blink', name: 'Blink', level: 18, cost: 21, power: 0.8, effect: 'Haste' },
+            { id: 'magic_barrier', name: 'Magic Barrier', level: 22, cost: 30, power: 0, effect: 'Shielded' },
+            { id: 'arcane_nova', name: 'Arcane Nova', level: 45, cost: 55, power: 6.0, effect: 'Shock' }
+        ]
+    }
+};
+
+const RPG_ITEMS = {
+    small_health_potion: { name: 'Small Health Potion', type: 'potion', rarity: 'Common', price: 35, sell: 12, heal: 45 },
+    medium_health_potion: { name: 'Medium Health Potion', type: 'potion', rarity: 'Uncommon', price: 85, sell: 30, heal: 100 },
+    large_health_potion: { name: 'Large Health Potion', type: 'potion', rarity: 'Rare', price: 175, sell: 65, heal: 225 },
+    small_mana_potion: { name: 'Small Mana Potion', type: 'potion', rarity: 'Common', price: 35, sell: 12, mana: 40 },
+    medium_mana_potion: { name: 'Medium Mana Potion', type: 'potion', rarity: 'Uncommon', price: 85, sell: 30, mana: 90 },
+    large_mana_potion: { name: 'Large Mana Potion', type: 'potion', rarity: 'Rare', price: 175, sell: 65, mana: 200 },
+    stamina_potion: { name: 'Stamina Potion', type: 'potion', rarity: 'Uncommon', price: 70, sell: 25, stamina: 80 },
+    antidote: { name: 'Antidote', type: 'potion', rarity: 'Common', price: 40, sell: 14, cures: ['Poison'] },
+    burn_cure: { name: 'Burn Cure', type: 'potion', rarity: 'Common', price: 40, sell: 14, cures: ['Burn'] },
+    freeze_cure: { name: 'Freeze Cure', type: 'potion', rarity: 'Common', price: 40, sell: 14, cures: ['Freeze'] },
+    strength_potion: { name: 'Strength Potion', type: 'potion', rarity: 'Rare', price: 150, sell: 55, buff: 'Strength Buff' },
+    intelligence_potion: { name: 'Intelligence Potion', type: 'potion', rarity: 'Rare', price: 150, sell: 55, buff: 'Intelligence Buff' },
+    defense_potion: { name: 'Defense Potion', type: 'potion', rarity: 'Rare', price: 150, sell: 55, buff: 'Defense Buff' },
+
+    iron_dagger: { name: 'Iron Dagger', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Common', attack: 5, price: 90, sell: 25 },
+    wolf_fang_daggers: { name: 'Wolf Fang Daggers', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Uncommon', attack: 10, price: 240, sell: 80 },
+    steel_rapier: { name: 'Steel Rapier', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Rare', attack: 17, price: 600, sell: 210 },
+    knight_sword: { name: 'Knight Sword', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Rare', attack: 24, price: 1000, sell: 350 },
+    orc_cleaver: { name: 'Orc Cleaver', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Epic', attack: 34, price: 1800, sell: 650 },
+    ogre_greatsword: { name: 'Ogre Greatsword', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Epic', attack: 47, price: 3200, sell: 1150 },
+    wyvern_blade: { name: 'Wyvern Blade', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Legendary', attack: 65, price: 6500, sell: 2400 },
+    dragon_slayer_greatsword: { name: 'Dragon Slayer Greatsword', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Legendary', attack: 88, price: 11000, sell: 4200 },
+    ancient_platinum_sword: { name: 'Ancient Platinum Sword', type: 'weapon', class: 'Swordsman', slot: 'weapon', rarity: 'Mythic', attack: 120, price: 22000, sell: 8500 },
+
+    apprentice_staff: { name: 'Apprentice Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Common', attack: 5, price: 90, sell: 25 },
+    slime_core_wand: { name: 'Slime Core Wand', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Uncommon', attack: 10, price: 240, sell: 80 },
+    crystal_staff: { name: 'Crystal Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Rare', attack: 17, price: 600, sell: 210 },
+    fire_mage_staff: { name: 'Fire Mage Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Rare', attack: 24, price: 1000, sell: 350 },
+    frost_mage_staff: { name: 'Frost Mage Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Epic', attack: 34, price: 1800, sell: 650 },
+    shadow_staff: { name: 'Shadow Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Epic', attack: 47, price: 3200, sell: 1150 },
+    wyvern_bone_staff: { name: 'Wyvern Bone Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Legendary', attack: 65, price: 6500, sell: 2400 },
+    dragon_heart_staff: { name: 'Dragon Heart Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Legendary', attack: 88, price: 11000, sell: 4200 },
+    ancient_arcane_staff: { name: 'Ancient Arcane Staff', type: 'weapon', class: 'Mage', slot: 'weapon', rarity: 'Mythic', attack: 120, price: 22000, sell: 8500 },
+
+    leather_adventurer_set: { name: 'Leather Adventurer Set', type: 'armor', slot: 'armor', rarity: 'Common', defense: 4, hp: 15, price: 120, sell: 35 },
+    iron_guard_set: { name: 'Iron Guard Set', type: 'armor', slot: 'armor', rarity: 'Uncommon', defense: 9, hp: 30, price: 350, sell: 115 },
+    wolf_hunter_set: { name: 'Wolf Hunter Set', type: 'armor', slot: 'armor', rarity: 'Uncommon', defense: 12, hp: 40, agility: 2, price: 550, sell: 180 },
+    goblin_slayer_set: { name: 'Goblin Slayer Set', type: 'armor', slot: 'armor', rarity: 'Rare', defense: 18, hp: 55, strength: 2, price: 950, sell: 330 },
+    orc_warrior_set: { name: 'Orc Warrior Set', type: 'armor', slot: 'armor', rarity: 'Epic', defense: 27, hp: 85, strength: 4, price: 1900, sell: 680 },
+    crystal_mage_set: { name: 'Crystal Mage Set', type: 'armor', slot: 'armor', rarity: 'Rare', defense: 16, hp: 45, intelligence: 4, price: 1200, sell: 420 },
+    shadow_hunter_set: { name: 'Shadow Hunter Set', type: 'armor', slot: 'armor', rarity: 'Epic', defense: 31, hp: 95, agility: 5, price: 2600, sell: 930 },
+    wyvern_scale_set: { name: 'Wyvern Scale Set', type: 'armor', slot: 'armor', rarity: 'Legendary', defense: 43, hp: 145, price: 5200, sell: 1900 },
+    dragon_scale_set: { name: 'Dragon Scale Set', type: 'armor', slot: 'armor', rarity: 'Legendary', defense: 58, hp: 210, price: 9800, sell: 3600 },
+    platinum_hero_set: { name: 'Platinum Hero Set', type: 'armor', slot: 'armor', rarity: 'Mythic', defense: 82, hp: 320, strength: 7, intelligence: 7, price: 20000, sell: 7800 },
+
+    wolf_fang: { name: 'Wolf Fang', type: 'part', rarity: 'Common', sell: 8 },
+    wolf_pelt: { name: 'Wolf Pelt', type: 'part', rarity: 'Common', sell: 10 },
+    slime_core: { name: 'Slime Core', type: 'part', rarity: 'Common', sell: 9 },
+    goblin_ear: { name: 'Goblin Ear', type: 'part', rarity: 'Common', sell: 12 },
+    goblin_dagger: { name: 'Goblin Dagger', type: 'part', rarity: 'Uncommon', sell: 30 },
+    spider_fang: { name: 'Spider Fang', type: 'part', rarity: 'Common', sell: 14 },
+    spider_silk: { name: 'Spider Silk', type: 'part', rarity: 'Uncommon', sell: 35 },
+    orc_tusk: { name: 'Orc Tusk', type: 'part', rarity: 'Uncommon', sell: 42 },
+    troll_bone: { name: 'Troll Bone', type: 'part', rarity: 'Rare', sell: 110 },
+    ogre_horn: { name: 'Ogre Horn', type: 'part', rarity: 'Rare', sell: 140 },
+    basilisk_scale: { name: 'Basilisk Scale', type: 'part', rarity: 'Rare', sell: 165 },
+    shadow_core: { name: 'Shadow Core', type: 'part', rarity: 'Epic', sell: 320 },
+    wyvern_claw: { name: 'Wyvern Claw', type: 'part', rarity: 'Epic', sell: 380 },
+    dragon_scale: { name: 'Dragon Scale', type: 'part', rarity: 'Legendary', sell: 800 },
+    dragon_fang: { name: 'Dragon Fang', type: 'part', rarity: 'Legendary', sell: 950 },
+    ancient_dragon_heart: { name: 'Ancient Dragon Heart', type: 'part', rarity: 'Mythic', sell: 5000 },
+    ancient_core: { name: 'Ancient Core', type: 'part', rarity: 'Legendary', sell: 750 },
+    special_token: { name: 'Guild Token', type: 'material', rarity: 'Rare', sell: 100 }
+};
+
+const RPG_ENEMIES = {
+    forest_wolf: { name: 'Forest Wolf', rank: 'Bronze', hp: 52, damage: 9, exp: 24, gold: 14, drops: [['wolf_fang', 0.75], ['wolf_pelt', 0.45]] },
+    slime: { name: 'Slime', rank: 'Bronze', hp: 44, damage: 7, exp: 20, gold: 12, drops: [['slime_core', 0.8]] },
+    goblin: { name: 'Goblin Scout', rank: 'Bronze', hp: 60, damage: 10, exp: 28, gold: 17, drops: [['goblin_ear', 0.8], ['goblin_dagger', 0.2]] },
+    cave_bat: { name: 'Cave Bat', rank: 'Bronze', hp: 48, damage: 8, exp: 22, gold: 13, drops: [['wolf_pelt', 0.25]] },
+    armored_goblin: { name: 'Armored Goblin', rank: 'Silver', hp: 105, damage: 16, exp: 48, gold: 32, drops: [['goblin_ear', 0.8], ['goblin_dagger', 0.4]] },
+    giant_spider: { name: 'Giant Spider', rank: 'Silver', hp: 96, damage: 17, exp: 52, gold: 34, drops: [['spider_fang', 0.8], ['spider_silk', 0.5]], status: 'Poison' },
+    bandit: { name: 'Bandit Raider', rank: 'Silver', hp: 115, damage: 18, exp: 56, gold: 38, drops: [['goblin_dagger', 0.35]] },
+    forest_troll: { name: 'Forest Troll', rank: 'Silver', hp: 420, damage: 28, exp: 260, gold: 190, drops: [['troll_bone', 0.8]], boss: true },
+    orc_warrior: { name: 'Orc Warrior', rank: 'Gold', hp: 175, damage: 25, exp: 86, gold: 58, drops: [['orc_tusk', 0.8]] },
+    basilisk: { name: 'Basilisk', rank: 'Gold', hp: 195, damage: 28, exp: 96, gold: 66, drops: [['basilisk_scale', 0.7]], status: 'Stun' },
+    ogre_brute: { name: 'Ogre Brute', rank: 'Gold', hp: 720, damage: 42, exp: 520, gold: 380, drops: [['ogre_horn', 0.85]], boss: true },
+    shadow_beast: { name: 'Shadow Beast', rank: 'Emerald', hp: 285, damage: 38, exp: 145, gold: 105, drops: [['shadow_core', 0.55]], status: 'Curse' },
+    wyvern: { name: 'Wyvern', rank: 'Emerald', hp: 340, damage: 43, exp: 170, gold: 125, drops: [['wyvern_claw', 0.65]] },
+    necromancer_apprentice: { name: 'Necromancer Apprentice', rank: 'Emerald', hp: 1080, damage: 62, exp: 880, gold: 720, drops: [['shadow_core', 0.9]], boss: true, status: 'Curse' },
+    lesser_dragon: { name: 'Lesser Dragon', rank: 'Diamond', hp: 520, damage: 62, exp: 260, gold: 210, drops: [['dragon_scale', 0.35], ['dragon_fang', 0.2]], status: 'Burn' },
+    ancient_construct: { name: 'Ancient Construct', rank: 'Diamond', hp: 480, damage: 58, exp: 245, gold: 195, drops: [['ancient_core', 0.45]] },
+    frost_giant: { name: 'Frost Giant', rank: 'Diamond', hp: 1750, damage: 88, exp: 1450, gold: 1250, drops: [['ancient_core', 0.85]], boss: true, status: 'Freeze' },
+    sky_guardian: { name: 'Sky Fortress Guardian', rank: 'Platinum', hp: 760, damage: 90, exp: 390, gold: 350, drops: [['ancient_core', 0.5]] },
+    demon_general: { name: "Demon Lord's General", rank: 'Platinum', hp: 2900, damage: 125, exp: 2600, gold: 2400, drops: [['ancient_core', 1]], boss: true, status: 'Curse' },
+    ancient_dragon: { name: 'Ancient Dragon', rank: 'Platinum', hp: 5000, damage: 155, exp: 5000, gold: 5000, drops: [['ancient_dragon_heart', 1], ['dragon_scale', 1], ['dragon_fang', 1]], boss: true, dragon: true, status: 'Burn' }
+};
+
+const RPG_CONTRACTS = {
+    Bronze: [
+        { id: 'bronze_wolves', name: 'Hunt 8 Forest Wolves', type: 'Hunt', target: 'forest_wolf', amount: 8, location: 'Whispering Forest', level: 1, gold: 140, exp: 180, rep: 110 },
+        { id: 'bronze_slimes', name: 'Defeat 6 Slimes', type: 'Hunt', target: 'slime', amount: 6, location: 'Greenfield Marsh', level: 1, gold: 115, exp: 145, rep: 90 },
+        { id: 'bronze_goblin_ears', name: 'Collect 5 Goblin Ears', type: 'Gathering', target: 'goblin', drop: 'goblin_ear', amount: 5, location: 'Old Trade Road', level: 2, gold: 170, exp: 200, rep: 125 },
+        { id: 'bronze_cave', name: 'Clear the Small Cave', type: 'Dungeon', dungeon: 'small_cave', amount: 1, location: 'Foothill Caverns', level: 3, gold: 250, exp: 310, rep: 175 }
+    ],
+    Silver: [
+        { id: 'silver_goblins', name: 'Hunt 10 Armored Goblins', type: 'Hunt', target: 'armored_goblin', amount: 10, location: 'Ironwood Pass', level: 7, gold: 390, exp: 520, rep: 220 },
+        { id: 'silver_troll', name: 'Defeat the Forest Troll', type: 'Boss', target: 'forest_troll', amount: 1, location: 'Trollwood Hollow', level: 10, gold: 650, exp: 760, rep: 350 },
+        { id: 'silver_spider', name: 'Collect 6 Spider Fangs', type: 'Gathering', target: 'giant_spider', drop: 'spider_fang', amount: 6, location: 'Silken Ravine', level: 8, gold: 440, exp: 570, rep: 245 },
+        { id: 'silver_bandit', name: 'Clear the Bandit Camp', type: 'Dungeon', dungeon: 'bandit_camp', amount: 1, location: 'Red Banner Camp', level: 11, gold: 750, exp: 900, rep: 390 }
+    ],
+    Gold: [
+        { id: 'gold_orcs', name: 'Hunt 12 Orc Warriors', type: 'Hunt', target: 'orc_warrior', amount: 12, location: 'Ashen Frontier', level: 16, gold: 950, exp: 1250, rep: 420 },
+        { id: 'gold_ogre', name: 'Defeat the Ogre Brute', type: 'Boss', target: 'ogre_brute', amount: 1, location: 'Broken Hills', level: 19, gold: 1400, exp: 1700, rep: 650 },
+        { id: 'gold_scales', name: 'Collect 8 Basilisk Scales', type: 'Gathering', target: 'basilisk', drop: 'basilisk_scale', amount: 8, location: 'Petrified Basin', level: 18, gold: 1150, exp: 1450, rep: 500 },
+        { id: 'gold_ruins', name: 'Clear the Ancient Ruins', type: 'Dungeon', dungeon: 'ancient_ruins', amount: 1, location: 'Forgotten Plateau', level: 21, gold: 1800, exp: 2200, rep: 760 }
+    ],
+    Emerald: [
+        { id: 'emerald_shadows', name: 'Hunt 10 Shadow Beasts', type: 'Hunt', target: 'shadow_beast', amount: 10, location: 'Umbral Forest', level: 27, gold: 2100, exp: 2750, rep: 800 },
+        { id: 'emerald_necromancer', name: 'Defeat the Necromancer Apprentice', type: 'Boss', target: 'necromancer_apprentice', amount: 1, location: 'Bone Spire', level: 31, gold: 3000, exp: 3900, rep: 1200 },
+        { id: 'emerald_claws', name: 'Collect 6 Wyvern Claws', type: 'Gathering', target: 'wyvern', drop: 'wyvern_claw', amount: 6, location: 'Storm Cliffs', level: 29, gold: 2500, exp: 3200, rep: 930 },
+        { id: 'emerald_catacombs', name: 'Clear the Haunted Catacombs', type: 'Dungeon', dungeon: 'haunted_catacombs', amount: 1, location: 'Gravewind Vale', level: 33, gold: 3900, exp: 5000, rep: 1450 }
+    ],
+    Diamond: [
+        { id: 'diamond_dragons', name: 'Hunt 8 Lesser Dragons', type: 'Hunt', target: 'lesser_dragon', amount: 8, location: 'Dragonfall Range', level: 38, gold: 4800, exp: 6200, rep: 1500 },
+        { id: 'diamond_giant', name: 'Defeat the Frost Giant', type: 'Boss', target: 'frost_giant', amount: 1, location: 'Frozen Crown', level: 42, gold: 7000, exp: 8800, rep: 2100 },
+        { id: 'diamond_cores', name: 'Collect 5 Ancient Cores', type: 'Gathering', target: 'ancient_construct', drop: 'ancient_core', amount: 5, location: 'Crystal Expanse', level: 40, gold: 5700, exp: 7200, rep: 1750 },
+        { id: 'diamond_crystal', name: 'Clear the Crystal Dungeon', type: 'Dungeon', dungeon: 'crystal_dungeon', amount: 1, location: 'Prismatic Depths', level: 44, gold: 8500, exp: 10500, rep: 2500 }
+    ],
+    Platinum: [
+        { id: 'platinum_dragon', name: 'Defeat the Ancient Dragon', type: 'Dragon', target: 'ancient_dragon', amount: 1, location: 'Ancient Dragon Lair', level: 50, gold: 15000, exp: 18000, rep: 3500 },
+        { id: 'platinum_general', name: "Defeat the Demon Lord's General", type: 'Boss', target: 'demon_general', amount: 1, location: 'Demon March', level: 52, gold: 12500, exp: 15500, rep: 3000 },
+        { id: 'platinum_fortress', name: 'Clear the Sky Fortress', type: 'Dungeon', dungeon: 'sky_fortress', amount: 1, location: 'Cloudbreaker Heights', level: 54, gold: 16000, exp: 19500, rep: 3800 },
+        { id: 'platinum_raid', name: 'Complete a Mythic Emergency Raid', type: 'Emergency', target: 'ancient_dragon', amount: 1, location: 'Guild Emergency Front', level: 56, gold: 20000, exp: 24000, rep: 4500 }
+    ]
+};
+
+const RPG_DUNGEONS = {
+    small_cave: { name: 'Small Cave', rank: 'Bronze', level: 3, enemies: ['cave_bat', 'slime', 'goblin', 'armored_goblin', 'forest_troll'], reward: { gold: 260, exp: 340 } },
+    bandit_camp: { name: 'Bandit Camp', rank: 'Silver', level: 11, enemies: ['bandit', 'armored_goblin', 'bandit', 'forest_troll', 'ogre_brute'], reward: { gold: 800, exp: 980 } },
+    ancient_ruins: { name: 'Ancient Ruins', rank: 'Gold', level: 21, enemies: ['orc_warrior', 'basilisk', 'orc_warrior', 'ogre_brute', 'necromancer_apprentice'], reward: { gold: 1900, exp: 2350 } },
+    haunted_catacombs: { name: 'Haunted Catacombs', rank: 'Emerald', level: 33, enemies: ['shadow_beast', 'shadow_beast', 'wyvern', 'necromancer_apprentice', 'frost_giant'], reward: { gold: 4100, exp: 5200 } },
+    crystal_dungeon: { name: 'Crystal Dungeon', rank: 'Diamond', level: 44, enemies: ['ancient_construct', 'lesser_dragon', 'ancient_construct', 'frost_giant', 'demon_general'], reward: { gold: 9000, exp: 11200 } },
+    sky_fortress: { name: 'Sky Fortress', rank: 'Platinum', level: 54, enemies: ['sky_guardian', 'lesser_dragon', 'sky_guardian', 'demon_general', 'ancient_dragon'], reward: { gold: 17000, exp: 20500 } },
+    ancient_dragon_lair: { name: 'Ancient Dragon Lair', rank: 'Platinum', level: 58, enemies: ['lesser_dragon', 'sky_guardian', 'lesser_dragon', 'demon_general', 'ancient_dragon'], reward: { gold: 22000, exp: 27000 } }
+};
+
+const RPG_RECIPES = {
+    wolf_fang_daggers: { gold: 120, materials: { wolf_fang: 5, wolf_pelt: 2 } },
+    slime_core_wand: { gold: 120, materials: { slime_core: 6 } },
+    steel_rapier: { gold: 350, materials: { goblin_dagger: 3, spider_silk: 2 } },
+    crystal_staff: { gold: 350, materials: { slime_core: 8, spider_silk: 3 } },
+    orc_cleaver: { gold: 900, materials: { orc_tusk: 8, troll_bone: 2 } },
+    frost_mage_staff: { gold: 900, materials: { basilisk_scale: 5, troll_bone: 2 } },
+    wyvern_blade: { gold: 3200, materials: { wyvern_claw: 8, dragon_scale: 2 } },
+    wyvern_bone_staff: { gold: 3200, materials: { wyvern_claw: 8, shadow_core: 4 } },
+    dragon_slayer_greatsword: { gold: 7200, materials: { dragon_scale: 8, dragon_fang: 5 } },
+    dragon_heart_staff: { gold: 7200, materials: { dragon_scale: 8, dragon_fang: 5 } },
+    ancient_platinum_sword: { gold: 15000, materials: { ancient_dragon_heart: 1, ancient_core: 8 } },
+    ancient_arcane_staff: { gold: 15000, materials: { ancient_dragon_heart: 1, ancient_core: 8 } },
+    iron_guard_set: { gold: 180, materials: { wolf_pelt: 4, goblin_ear: 4 } },
+    wolf_hunter_set: { gold: 300, materials: { wolf_pelt: 8, wolf_fang: 5 } },
+    goblin_slayer_set: { gold: 550, materials: { goblin_ear: 10, goblin_dagger: 4 } },
+    orc_warrior_set: { gold: 1100, materials: { orc_tusk: 10, ogre_horn: 2 } },
+    crystal_mage_set: { gold: 900, materials: { basilisk_scale: 6, slime_core: 10 } },
+    shadow_hunter_set: { gold: 1800, materials: { shadow_core: 6, wyvern_claw: 3 } },
+    wyvern_scale_set: { gold: 3800, materials: { wyvern_claw: 10, dragon_scale: 4 } },
+    dragon_scale_set: { gold: 7500, materials: { dragon_scale: 12, dragon_fang: 5 } },
+    platinum_hero_set: { gold: 15000, materials: { ancient_dragon_heart: 1, ancient_core: 10, dragon_scale: 10 } }
+};
+
+let rpgStore = { players: {}, parties: {}, nextPartyId: 1 };
+const rpgPendingSales = new Map();
+const rpgPartyInvites = new Map();
+
+function loadRpgStore() {
+    if (!fs.existsSync(RPG_STORE_FILE)) return;
+    try {
+        const parsed = JSON.parse(fs.readFileSync(RPG_STORE_FILE, 'utf8'));
+        rpgStore = {
+            players: parsed?.players && typeof parsed.players === 'object' ? parsed.players : {},
+            parties: parsed?.parties && typeof parsed.parties === 'object' ? parsed.parties : {},
+            nextPartyId: Math.max(1, Number.parseInt(parsed?.nextPartyId || '1', 10) || 1)
+        };
+        console.log(`Loaded ${Object.keys(rpgStore.players).length} Adventurer Guild RPG profile(s).`);
+    } catch (error) {
+        console.error('Failed to load Adventurer Guild RPG data:', error);
+    }
+}
+
+function saveRpgStore() {
+    try {
+        const tempFile = `${RPG_STORE_FILE}.tmp`;
+        fs.writeFileSync(tempFile, JSON.stringify(rpgStore, null, 2));
+        fs.renameSync(tempFile, RPG_STORE_FILE);
+    } catch (error) {
+        console.error('Failed to save Adventurer Guild RPG data:', error);
+    }
+}
+
+function getRpgPlayerKey(guildId, userId) {
+    return `${guildId}:${userId}`;
+}
+
+function getRpgPlayer(guildId, userId) {
+    return rpgStore.players[getRpgPlayerKey(guildId, userId)] || null;
+}
+
+function putRpgPlayer(player) {
+    rpgStore.players[getRpgPlayerKey(player.guildId, player.userId)] = player;
+}
+
+function normalizeRpgPlayer(player) {
+    if (!player) return null;
+    player.inventory = player.inventory || {};
+    player.gearUpgrades = player.gearUpgrades || {};
+    player.gearDurability = player.gearDurability || {};
+    player.equipment = player.equipment || { weapon: null, armor: null, accessory: null };
+    player.stats = player.stats || { strength: 1, intelligence: 1, defense: 1, health: 1, agility: 1, stamina: 1 };
+    player.unlockedSkills = Array.isArray(player.unlockedSkills) ? player.unlockedSkills : [];
+    player.achievements = Array.isArray(player.achievements) ? player.achievements : [];
+    player.titles = Array.isArray(player.titles) ? player.titles : ['Rookie Adventurer'];
+    player.cooldowns = player.cooldowns || {};
+    player.counters = player.counters || {};
+    player.statPoints = Number(player.statPoints || 0);
+    player.skillPoints = Number(player.skillPoints || 0);
+    player.level = Math.max(1, Number(player.level || 1));
+    player.exp = Math.max(0, Number(player.exp || 0));
+    player.gold = Math.max(0, Number(player.gold || 0));
+    player.guildReputation = Math.max(0, Number(player.guildReputation || 0));
+    player.guildRank = RPG_RANKS.includes(player.guildRank) ? player.guildRank : 'Bronze';
+    player.activityStreak = Math.max(0, Number(player.activityStreak || 0));
+    player.lastActiveDate = player.lastActiveDate || null;
+    player.lastRpgAction = player.lastRpgAction || 'joined the guild';
+    player.lastSeenAt = player.lastSeenAt || player.createdAt || new Date().toISOString();
+    return player;
+}
+
+function createRpgPlayer(guildId, user, className) {
+    const classData = RPG_CLASS_DATA[className];
+    const starterSkill = classData.skills[0];
+    const player = normalizeRpgPlayer({
+        guildId,
+        userId: user.id,
+        username: user.username,
+        className,
+        level: 1,
+        exp: 0,
+        gold: 150,
+        guildRank: 'Bronze',
+        guildReputation: 0,
+        stats: { ...classData.baseStats },
+        statPoints: 0,
+        skillPoints: 1,
+        unlockedSkills: [starterSkill.id],
+        inventory: {
+            [classData.starterWeapon]: 1,
+            leather_adventurer_set: 1,
+            small_health_potion: 3,
+            ...(className === 'Mage' ? { small_mana_potion: 2 } : { stamina_potion: 2 })
+        },
+        gearUpgrades: {},
+        gearDurability: { [classData.starterWeapon]: 100, leather_adventurer_set: 100 },
+        equipment: { weapon: classData.starterWeapon, armor: 'leather_adventurer_set', accessory: null },
+        activeContract: null,
+        activeBattle: null,
+        currentHp: 1,
+        currentMana: 1,
+        currentStamina: 1,
+        cooldowns: {},
+        counters: {
+            monstersDefeated: 0,
+            contractsCompleted: 0,
+            partsSold: 0,
+            itemsCrafted: 0,
+            bossesDefeated: 0,
+            dragonsDefeated: 0,
+            dungeonClears: 0
+        },
+        daily: null,
+        weekly: null,
+        achievements: [],
+        titles: ['Rookie Adventurer'],
+        equippedTitle: 'Rookie Adventurer',
+        partyId: null,
+        activityStreak: 1,
+        lastActiveDate: new Date().toISOString().slice(0, 10),
+        lastRpgAction: 'joined the guild',
+        lastSeenAt: new Date().toISOString(),
+        createdAt: new Date().toISOString()
+    });
+    const derived = getRpgDerivedStats(player);
+    player.currentHp = derived.maxHp;
+    player.currentMana = derived.maxMana;
+    player.currentStamina = derived.maxStamina;
+    unlockRpgAchievement(player, 'Bronze Adventurer');
+    putRpgPlayer(player);
+    saveRpgStore();
+    return player;
+}
+
+function getRpgItemUpgrade(player, itemId) {
+    return Math.max(0, Number(player.gearUpgrades?.[itemId] || 0));
+}
+
+function getRpgEquippedItem(player, slot) {
+    const itemId = player.equipment?.[slot];
+    return itemId ? RPG_ITEMS[itemId] : null;
+}
+
+function getRpgDerivedStats(player) {
+    normalizeRpgPlayer(player);
+    const weaponId = player.equipment.weapon;
+    const armorId = player.equipment.armor;
+    const rawWeapon = getRpgEquippedItem(player, 'weapon');
+    const rawArmor = getRpgEquippedItem(player, 'armor');
+    const weapon = rawWeapon && Number(player.gearDurability?.[weaponId] ?? 100) > 0 ? rawWeapon : null;
+    const armor = rawArmor && Number(player.gearDurability?.[armorId] ?? 100) > 0 ? rawArmor : null;
+    const weaponUpgrade = getRpgItemUpgrade(player, weaponId);
+    const armorUpgrade = getRpgItemUpgrade(player, armorId);
+    const maxHp = 70 + player.level * 6 + player.stats.health * 12 + Number(armor?.hp || 0) + armorUpgrade * 12;
+    const maxMana = player.className === 'Mage'
+        ? 55 + player.level * 4 + player.stats.intelligence * 9
+        : 20 + player.level * 2 + player.stats.intelligence * 3;
+    const maxStamina = player.className === 'Swordsman'
+        ? 55 + player.level * 4 + player.stats.stamina * 9
+        : 30 + player.level * 2 + player.stats.stamina * 4;
+    const attackStat = player.className === 'Mage' ? player.stats.intelligence : player.stats.strength;
+    const attack = 7 + player.level * 2 + attackStat * 3 + Number(weapon?.attack || 0) + weaponUpgrade * 4;
+    const defense = player.stats.defense * 2.2 + Number(armor?.defense || 0) + armorUpgrade * 3;
+    const agility = player.stats.agility + Number(armor?.agility || 0);
+    return {
+        maxHp: Math.round(maxHp),
+        maxMana: Math.round(maxMana),
+        maxStamina: Math.round(maxStamina),
+        attack: Math.round(attack),
+        defense: Math.round(defense),
+        agility,
+        critChance: Math.min(0.35, 0.05 + agility * 0.006),
+        dodgeChance: Math.min(0.28, agility * 0.005)
+    };
+}
+
+function syncRpgResources(player, refill = false) {
+    const derived = getRpgDerivedStats(player);
+    if (refill) {
+        player.currentHp = derived.maxHp;
+        player.currentMana = derived.maxMana;
+        player.currentStamina = derived.maxStamina;
+    } else {
+        player.currentHp = Math.min(derived.maxHp, Math.max(0, Number(player.currentHp || derived.maxHp)));
+        player.currentMana = Math.min(derived.maxMana, Math.max(0, Number(player.currentMana ?? derived.maxMana)));
+        player.currentStamina = Math.min(derived.maxStamina, Math.max(0, Number(player.currentStamina ?? derived.maxStamina)));
+    }
+    return derived;
+}
+
+function getRpgExpNeeded(level) {
+    return Math.floor(100 * Math.pow(level, 1.35));
+}
+
+function addRpgInventory(player, itemId, quantity = 1) {
+    if (!RPG_ITEMS[itemId] || quantity <= 0) return;
+    player.inventory[itemId] = Math.max(0, Number(player.inventory[itemId] || 0)) + quantity;
+}
+
+function removeRpgInventory(player, itemId, quantity = 1) {
+    const owned = Math.max(0, Number(player.inventory[itemId] || 0));
+    if (quantity <= 0 || owned < quantity) return false;
+    const remaining = owned - quantity;
+    if (remaining > 0) player.inventory[itemId] = remaining;
+    else delete player.inventory[itemId];
+    return true;
+}
+
+function unlockRpgAchievement(player, achievement) {
+    if (player.achievements.includes(achievement)) return false;
+    player.achievements.push(achievement);
+    const titleMap = {
+        'Bronze Adventurer': 'Rookie Adventurer',
+        'Silver Adventurer': 'Wolf Hunter',
+        'Gold Adventurer': 'Goblin Slayer',
+        'Dragon Hunter': 'Dragon Hunter',
+        'Master Swordsman': 'Blade Master',
+        'Master Mage': 'Arcane Master',
+        'Dungeon Conqueror': 'Dungeon Explorer',
+        'Platinum Hero': 'Platinum Hero'
+    };
+    const title = titleMap[achievement];
+    if (title && !player.titles.includes(title)) player.titles.push(title);
+    return true;
+}
+
+function addRpgExp(player, amount, logLines = []) {
+    player.exp += Math.max(0, Math.floor(amount));
+    let levels = 0;
+    const oldLevel = player.level;
+    while (player.exp >= getRpgExpNeeded(player.level)) {
+        player.exp -= getRpgExpNeeded(player.level);
+        player.level += 1;
+        player.statPoints += 3;
+        player.skillPoints += 1;
+        levels += 1;
+    }
+    if (levels > 0) {
+        syncRpgResources(player, true);
+        const classEmoji = RPG_CLASS_DATA[player.className]?.emoji || '🧙';
+        logLines.push(`🌟🎉 **LEVEL UP!** ${classEmoji} **${player.username}** advanced from **Lv.${oldLevel}** to **Lv.${player.level}**!`);
+        logLines.push(`📊 **+${levels * 3} Stat Points** · 🌟 **+${levels} Skill Point${levels === 1 ? '' : 's'}** · ❤️ Resources fully restored.`);
+        logLines.push(`📖 *A warm light surrounds your guild crest as new strength awakens.*`);
+        if (player.className === 'Swordsman' && player.level >= 45) unlockRpgAchievement(player, 'Master Swordsman');
+        if (player.className === 'Mage' && player.level >= 45) unlockRpgAchievement(player, 'Master Mage');
+    }
+    return levels;
+}
+
+function getRpgRankIndex(rank) {
+    return Math.max(0, RPG_RANKS.indexOf(rank));
+}
+
+function canAccessRpgRank(playerRank, requiredRank) {
+    return getRpgRankIndex(playerRank) >= getRpgRankIndex(requiredRank);
+}
+
+function getRpgContractByInput(player, input) {
+    const contracts = RPG_CONTRACTS[player.guildRank] || [];
+    const clean = String(input || '').trim().toLowerCase();
+    if (!clean) return null;
+    const number = Number.parseInt(clean, 10);
+    if (Number.isFinite(number) && number >= 1 && number <= contracts.length) return contracts[number - 1];
+    return contracts.find(contract => contract.id === clean || contract.name.toLowerCase() === clean || contract.name.toLowerCase().includes(clean));
+}
+
+
+function getRpgEnemy(enemyId, difficultyMultiplier = 1) {
+    const base = RPG_ENEMIES[enemyId];
+    if (!base) return null;
+    return {
+        id: enemyId,
+        emoji: getRpgEnemyEmoji(enemyId),
+        name: base.name,
+        rank: base.rank,
+        maxHp: Math.round(base.hp * difficultyMultiplier),
+        hp: Math.round(base.hp * difficultyMultiplier),
+        damage: Math.round(base.damage * (0.9 + difficultyMultiplier * 0.25)),
+        exp: Math.round(base.exp * difficultyMultiplier),
+        gold: Math.round(base.gold * difficultyMultiplier),
+        drops: base.drops,
+        boss: Boolean(base.boss),
+        dragon: Boolean(base.dragon),
+        status: base.status || null,
+        phase: 1,
+        statuses: []
+    };
+}
+
+function createRpgParty(guildId, leaderId) {
+    const id = String(rpgStore.nextPartyId++);
+    rpgStore.parties[id] = { id, guildId, leaderId, members: [leaderId], createdAt: new Date().toISOString() };
+    const leader = getRpgPlayer(guildId, leaderId);
+    if (leader) leader.partyId = id;
+    saveRpgStore();
+    return rpgStore.parties[id];
+}
+
+function getRpgParty(player) {
+    return player?.partyId ? rpgStore.parties[player.partyId] || null : null;
+}
+
+function cleanRpgParty(party) {
+    if (!party) return;
+    party.members = party.members.filter(userId => Boolean(getRpgPlayer(party.guildId, userId)));
+    if (!party.members.includes(party.leaderId)) party.leaderId = party.members[0] || null;
+    if (party.members.length <= 1) {
+        for (const userId of party.members) {
+            const player = getRpgPlayer(party.guildId, userId);
+            if (player) player.partyId = null;
+        }
+        delete rpgStore.parties[party.id];
+    }
+}
+
+function getRpgBattleOwner(guildId, userId) {
+    const own = getRpgPlayer(guildId, userId);
+    if (own?.activeBattle) return own;
+    const party = getRpgParty(own);
+    if (!party) return null;
+    for (const memberId of party.members) {
+        const member = getRpgPlayer(guildId, memberId);
+        if (member?.activeBattle?.participants?.includes(userId)) return member;
+    }
+    return null;
+}
+
+function getRpgBattleParticipants(player) {
+    const party = getRpgParty(player);
+    if (!party || party.leaderId !== player.userId) return [player.userId];
+    return party.members.slice(0, RPG_MAX_PARTY_SIZE);
+}
+
+
+function createRpgBattle(player, enemyId, options = {}) {
+    const participants = getRpgBattleParticipants(player);
+    const participantStates = {};
+    for (const userId of participants) {
+        const member = getRpgPlayer(player.guildId, userId);
+        if (!member) continue;
+        const derived = syncRpgResources(member, false);
+        participantStates[userId] = {
+            hp: Math.max(1, member.currentHp || derived.maxHp),
+            mana: member.currentMana,
+            stamina: member.currentStamina,
+            defending: false,
+            statuses: [],
+            lastAction: null
+        };
+    }
+    const enemy = getRpgEnemy(enemyId, options.difficultyMultiplier || 1);
+    const battle = {
+        id: crypto.randomBytes(5).toString('hex'),
+        ownerId: player.userId,
+        guildId: player.guildId,
+        participants: Object.keys(participantStates),
+        participantStates,
+        enemy,
+        type: options.type || 'hunt',
+        dungeonId: options.dungeonId || null,
+        dungeonRoom: options.dungeonRoom || 0,
+        difficulty: options.difficulty || 'Normal',
+        difficultyMultiplier: options.difficultyMultiplier || 1,
+        createdAt: Date.now(),
+        turn: 1,
+        momentum: 0,
+        lastEventTurn: 0,
+        enemyIntent: rollRpgEnemyIntent(enemy),
+        log: [
+            `${getRpgEnemyEmoji(enemy)} **${enemy?.name || 'An enemy'} appears!**`,
+            `📖 *${pickRpgFlavor('battleStart')}*`,
+            `👁️ ${enemy?.name || 'The enemy'} studies the party...`
+        ]
+    };
+    // Keep the displayed intent and the executed intent identical.
+    battle.log[battle.log.length - 1] = `👁️ ${enemy?.name || 'The enemy'} is preparing **${battle.enemyIntent.name}**.`;
+    player.activeBattle = battle;
+    touchRpgPlayer(player, `entered battle with ${enemy?.name || enemyId}`);
+    putRpgPlayer(player);
+    saveRpgStore();
+    return battle;
+}
+
+function getRpgStatusText(statuses = []) {
+    return statuses.length > 0
+        ? statuses.map(status => `${getRpgStatusEmoji(status.name)} ${status.name} (${status.turns})`).join(' • ')
+        : '✨ None';
+}
+
+
+function buildRpgBattleEmbed(ownerPlayer) {
+    const battle = ownerPlayer.activeBattle;
+    if (!battle) return null;
+    const enemy = battle.enemy;
+    if (!battle.enemyIntent) battle.enemyIntent = rollRpgEnemyIntent(enemy);
+    const enemyBar = buildRpgProgressBar(enemy.hp, enemy.maxHp, 16);
+    const enemyMood = getRpgHealthMood(enemy.hp, enemy.maxHp);
+    const momentum = getRpgBattleMomentum(battle);
+    const partyLines = battle.participants.map(userId => {
+        const player = getRpgPlayer(battle.guildId, userId);
+        const state = battle.participantStates[userId];
+        if (!player || !state) return null;
+        const derived = getRpgDerivedStats(player);
+        const resource = player.className === 'Mage'
+            ? `💙 ${Math.round(state.mana)}/${derived.maxMana}`
+            : `⚡ ${Math.round(state.stamina)}/${derived.maxStamina}`;
+        const healthMood = getRpgHealthMood(state.hp, derived.maxHp);
+        const stateIcon = state.hp <= 0 ? '💀' : state.defending ? '🛡️' : RPG_CLASS_DATA[player.className]?.emoji || '🧙';
+        const statusText = state.statuses.length ? `\n└ ${getRpgStatusText(state.statuses)}` : '';
+        return `${stateIcon} <@${userId}> · ${healthMood.emoji} ${Math.max(0, Math.round(state.hp))}/${derived.maxHp} · ${resource}${statusText}`;
+    }).filter(Boolean);
+    const phaseText = enemy.boss ? ` · Phase ${enemy.phase}` : '';
+    const encounterText = battle.type === 'dungeon'
+        ? `${getRpgDungeonEmoji(battle.dungeonId)} ${getRpgDifficultyEmoji(battle.difficulty)} ${battle.difficulty} · Room ${battle.dungeonRoom + 1}/5`
+        : `${getRpgContractEmoji(battle.type === 'dragon' ? 'Dragon' : battle.type === 'boss' ? 'Boss' : 'Hunt')} ${String(battle.type).toUpperCase()}`;
+    return new EmbedBuilder()
+        .setColor(enemyMood.color || (enemy.dragon ? '#C0392B' : enemy.boss ? '#8E44AD' : RPG_RANK_COLORS[enemy.rank] || '#9B7A3C'))
+        .setTitle(`${getRpgEnemyEmoji(enemy)} ${enemy.name}${phaseText}`)
+        .setDescription([
+            `${getRpgRankEmoji(enemy.rank)} **${enemy.rank} Encounter** · ${enemyMood.emoji} ${enemyMood.label}`,
+            `❤️ **Enemy HP:** ${Math.max(0, Math.round(enemy.hp))}/${enemy.maxHp}`,
+            `\`${enemyBar}\``,
+            `${getRpgStatusEmoji('Shielded')} **Enemy Status:** ${getRpgStatusText(enemy.statuses)}`
+        ].join('\n'))
+        .addFields(
+            { name: `${battle.enemyIntent.emoji} Enemy Intent`, value: `**${battle.enemyIntent.name}**\n${battle.enemyIntent.hint}`, inline: true },
+            { name: `${momentum.emoji} Party Momentum`, value: `**${momentum.value}/10** · +${Math.round((momentum.multiplier - 1) * 100)}% damage\n\`${buildRpgProgressBar(momentum.value, 10, 10)}\``, inline: true },
+            { name: '🛡️ Adventuring Party', value: partyLines.join('\n') || 'No active adventurers.', inline: false },
+            { name: '📖 Live Battle Log', value: battle.log.slice(-9).join('\n').slice(0, 1024) || '⚔️ The battle begins.', inline: false },
+            { name: '🔄 Turn', value: `**${battle.turn}**`, inline: true },
+            { name: '🗺️ Encounter', value: encounterText, inline: true },
+            { name: '🎯 Actions', value: '⚔️ Attack · ✨ Skill · 🛡️ Defend · 🧪 Potion · 🏃 Flee', inline: false }
+        )
+        .setFooter({ text: 'Read the enemy intent • Build momentum • Every action advances the battle.' })
+        .setTimestamp();
+}
+
+function buildRpgBattleRows(ownerPlayer) {
+    const battle = ownerPlayer.activeBattle;
+    if (!battle) return [];
+    const momentum = getRpgBattleMomentum(battle);
+    return [
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`rpg_battle:${battle.id}:attack`).setLabel('Strike').setEmoji('⚔️').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`rpg_battle:${battle.id}:skill`).setLabel(momentum.value >= 8 ? 'Empowered Skill' : 'Skill').setEmoji(momentum.value >= 8 ? '🔥' : '✨').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`rpg_battle:${battle.id}:defend`).setLabel('Guard').setEmoji('🛡️').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`rpg_battle:${battle.id}:potion`).setLabel('Potion').setEmoji('🧪').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`rpg_battle:${battle.id}:flee`).setLabel('Retreat').setEmoji('🏃').setStyle(ButtonStyle.Danger)
+        )
+    ];
+}
+
+function addRpgStatus(targetStatuses, name, turns = 2, power = 0) {
+    const existing = targetStatuses.find(status => status.name === name);
+    if (existing) {
+        existing.turns = Math.max(existing.turns, turns);
+        existing.power = Math.max(existing.power || 0, power || 0);
+    } else {
+        targetStatuses.push({ name, turns, power });
+    }
+}
+
+
+function tickRpgStatuses(battle) {
+    const enemy = battle.enemy;
+    let skipEnemy = false;
+    for (const status of [...enemy.statuses]) {
+        if (['Burn', 'Poison', 'Bleed', 'Curse', 'Shock'].includes(status.name)) {
+            const damage = Math.max(2, Math.round(status.power || enemy.maxHp * 0.025));
+            enemy.hp -= damage;
+            battle.log.push(`${getRpgStatusEmoji(status.name)} **${status.name}** deals **${damage}** damage to ${getRpgEnemyEmoji(enemy)} ${enemy.name}.`);
+        }
+        if (['Freeze', 'Stun'].includes(status.name)) skipEnemy = true;
+        status.turns -= 1;
+        if (status.turns <= 0) battle.log.push(`✨ ${getRpgStatusEmoji(status.name)} **${status.name}** faded from ${enemy.name}.`);
+    }
+    enemy.statuses = enemy.statuses.filter(status => status.turns > 0);
+    return skipEnemy;
+}
+
+
+function tickRpgPlayerStatuses(player, state, battle) {
+    const derived = getRpgDerivedStats(player);
+    let skipAction = false;
+    for (const status of [...state.statuses]) {
+        if (['Burn', 'Poison', 'Bleed', 'Curse', 'Shock'].includes(status.name)) {
+            const damage = Math.max(2, Math.round(status.power || derived.maxHp * 0.035));
+            state.hp = Math.max(0, state.hp - damage);
+            battle.log.push(`${getRpgStatusEmoji(status.name)} **${player.username}** suffers **${damage}** damage from **${status.name}**.`);
+        }
+        if (['Freeze', 'Stun'].includes(status.name)) skipAction = true;
+        status.turns -= 1;
+    }
+    state.statuses = state.statuses.filter(status => status.turns > 0);
+    if (skipAction && state.hp > 0) battle.log.push(`🚫 **${player.username}** is unable to act this turn.`);
+    return skipAction;
+}
+
+function getRpgBestSkill(player) {
+    const classSkills = RPG_CLASS_DATA[player.className].skills;
+    return [...classSkills]
+        .filter(skill => player.unlockedSkills.includes(skill.id))
+        .sort((left, right) => right.power - left.power)[0] || classSkills[0];
+}
+
+
+function useRpgBattlePotion(player, state, battle) {
+    const derived = getRpgDerivedStats(player);
+    const priority = state.hp < derived.maxHp * 0.55
+        ? ['large_health_potion', 'medium_health_potion', 'small_health_potion']
+        : player.className === 'Mage'
+            ? ['large_mana_potion', 'medium_mana_potion', 'small_mana_potion']
+            : ['stamina_potion'];
+    const itemId = priority.find(id => Number(player.inventory[id] || 0) > 0);
+    if (!itemId) return { ok: false, message: '🧪 Your potion pouch has nothing useful for the current situation.' };
+    const item = RPG_ITEMS[itemId];
+    removeRpgInventory(player, itemId, 1);
+    const effects = [];
+    if (item.heal) { state.hp = Math.min(derived.maxHp, state.hp + item.heal); effects.push(`❤️ +${item.heal} HP`); }
+    if (item.mana) { state.mana = Math.min(derived.maxMana, state.mana + item.mana); effects.push(`💙 +${item.mana} Mana`); }
+    if (item.stamina) { state.stamina = Math.min(derived.maxStamina, state.stamina + item.stamina); effects.push(`⚡ +${item.stamina} Stamina`); }
+    if (item.buff) { addRpgStatus(state.statuses, item.buff, 3, 0); effects.push(`${getRpgStatusEmoji(item.buff)} ${item.buff}`); }
+    battle.log.push(`${getRpgItemEmoji(itemId, item)} **${player.username}** uses **${item.name}** · ${effects.join(' · ') || 'restored'}.`);
+    return { ok: true };
+}
+
+
+function applyRpgPlayerAction(ownerPlayer, actorPlayer, action) {
+    const battle = ownerPlayer.activeBattle;
+    const state = battle.participantStates[actorPlayer.userId];
+    const derived = getRpgDerivedStats(actorPlayer);
+    if (!state || state.hp <= 0) return { ok: false, message: '💀 You cannot act while defeated.' };
+    const skipAction = tickRpgPlayerStatuses(actorPlayer, state, battle);
+    if (state.hp <= 0) return { ok: true };
+    if (skipAction) return { ok: true };
+    state.defending = false;
+    state.lastAction = action;
+    const momentum = getRpgBattleMomentum(battle);
+    const damageMultiplier = momentum.multiplier;
+    if (action === 'attack') {
+        const hasteBonus = state.statuses.some(status => status.name === 'Haste') ? 0.1 : 0;
+        const critical = Math.random() < Math.min(0.6, derived.critChance + hasteBonus);
+        const attackBuff = state.statuses.some(status => status.name === (actorPlayer.className === 'Mage' ? 'Intelligence Buff' : 'Strength Buff')) ? 1.25 : 1;
+        const exposedBonus = battle.enemy.statuses.some(status => status.name === 'Defense Down') ? 1.2 : 1;
+        let damage = Math.max(1, Math.round(derived.attack * attackBuff * exposedBonus * damageMultiplier * (0.85 + Math.random() * 0.3)));
+        if (critical) damage = Math.round(damage * 1.65);
+        battle.enemy.hp -= damage;
+        battle.momentum = Math.min(10, momentum.value + (critical ? 2 : 1));
+        const verb = actorPlayer.className === 'Mage' ? 'launches an arcane bolt' : ['slashes forward', 'strikes a weak point', 'carves through the guard'][Math.floor(Math.random() * 3)];
+        battle.log.push(`${RPG_CLASS_DATA[actorPlayer.className].emoji} **${actorPlayer.username}** ${verb} for **${damage}** damage${critical ? ' 💥 **CRITICAL!**' : '.'}`);
+        if (Math.random() < 0.2) battle.log.push(`📖 *${pickRpgFlavor('attack')}*`);
+        return { ok: true };
+    }
+    if (action === 'skill') {
+        const skill = getRpgBestSkill(actorPlayer);
+        const resourceKey = RPG_CLASS_DATA[actorPlayer.className].resource;
+        const resourceEmoji = resourceKey === 'mana' ? '💙' : '⚡';
+        if (state[resourceKey] < skill.cost) return { ok: false, message: `${resourceEmoji} Not enough ${resourceKey} for **${skill.name}**. You need ${skill.cost}.` };
+        state[resourceKey] -= skill.cost;
+        battle.momentum = Math.min(10, momentum.value + 2);
+        if (skill.effect === 'Heal') {
+            const heal = Math.round(derived.maxHp * 0.32 + actorPlayer.stats.intelligence * 3);
+            state.hp = Math.min(derived.maxHp, state.hp + heal);
+            battle.log.push(`${getRpgSkillEmoji(skill)} **${actorPlayer.username}** casts **${skill.name}** and restores **${heal} HP**. ❤️`);
+            return { ok: true };
+        }
+        if (skill.effect === 'Shielded' || skill.effect === 'Defense Buff' || skill.effect === 'Haste') addRpgStatus(state.statuses, skill.effect, 3, actorPlayer.level);
+        const attackBuff = state.statuses.some(status => status.name === (actorPlayer.className === 'Mage' ? 'Intelligence Buff' : 'Strength Buff')) ? 1.25 : 1;
+        const exposedBonus = battle.enemy.statuses.some(status => status.name === 'Defense Down') ? 1.2 : 1;
+        const empowered = momentum.value >= 8 ? 1.2 : 1;
+        let damage = Math.max(1, Math.round(derived.attack * attackBuff * exposedBonus * damageMultiplier * empowered * skill.power * (0.9 + Math.random() * 0.2)));
+        if (skill.effect === 'Drain') state.hp = Math.min(derived.maxHp, state.hp + Math.round(damage * 0.35));
+        battle.enemy.hp -= damage;
+        if (skill.effect && !['Heal', 'Shielded', 'Defense Buff', 'Haste', 'Drain'].includes(skill.effect)) {
+            addRpgStatus(battle.enemy.statuses, skill.effect, 2, Math.max(3, Math.round(damage * 0.12)));
+        }
+        battle.log.push(`${getRpgSkillEmoji(skill)} **${actorPlayer.username}** unleashes **${skill.name}** for **${damage}** damage${empowered > 1 ? ' 🔥 **EMPOWERED!**' : ''}${skill.effect ? ` · ${getRpgStatusEmoji(skill.effect)} **${skill.effect}**` : ''}.`);
+        if (Math.random() < 0.25) battle.log.push(`📖 *${pickRpgFlavor('skill')}*`);
+        return { ok: true };
+    }
+    if (action === 'defend') {
+        state.defending = true;
+        addRpgStatus(state.statuses, 'Defense Buff', 1, 0);
+        battle.momentum = Math.min(10, momentum.value + 1);
+        const intentHint = battle.enemyIntent?.name ? ` against **${battle.enemyIntent.name}**` : '';
+        battle.log.push(`🛡️ **${actorPlayer.username}** raises their guard${intentHint}. Incoming damage will be reduced.`);
+        return { ok: true };
+    }
+    if (action === 'potion') {
+        battle.momentum = Math.max(0, momentum.value - 1);
+        return useRpgBattlePotion(actorPlayer, state, battle);
+    }
+    if (action === 'flee') {
+        const chance = Math.min(0.9, 0.45 + derived.agility * 0.015);
+        if (Math.random() < chance && !battle.enemy.boss) {
+            battle.log.push(`🏃💨 **${actorPlayer.username}** escapes through a narrow opening.`);
+            ownerPlayer.activeBattle = null;
+            return { ok: true, fled: true };
+        }
+        battle.momentum = Math.max(0, momentum.value - 2);
+        battle.log.push(`🚫 **${actorPlayer.username}** tries to flee, but ${getRpgEnemyEmoji(battle.enemy)} **${battle.enemy.name}** blocks the path!`);
+        return { ok: true };
+    }
+    return { ok: false, message: '❓ Unknown battle action.' };
+}
+
+function performRpgEnemyTurn(ownerPlayer, skipEnemy = false) {
+    const battle = ownerPlayer.activeBattle;
+    if (!battle || battle.enemy.hp <= 0) return;
+    const enemyEmoji = getRpgEnemyEmoji(battle.enemy);
+    const intent = battle.enemyIntent || rollRpgEnemyIntent(battle.enemy);
+    if (skipEnemy) {
+        battle.log.push(`${getRpgStatusEmoji('Freeze')} ${enemyEmoji} **${battle.enemy.name}** cannot execute **${intent.name}** this turn.`);
+        battle.enemyIntent = rollRpgEnemyIntent(battle.enemy);
+        return;
+    }
+    const alive = battle.participants.filter(userId => battle.participantStates[userId]?.hp > 0);
+    if (alive.length === 0) return;
+    if (intent.area && alive.length > 1) {
+        battle.log.push(`${intent.emoji} ${enemyEmoji} **${battle.enemy.name} unleashes ${intent.name}!**`);
+        for (const userId of alive) {
+            const partyMember = getRpgPlayer(battle.guildId, userId);
+            const partyState = battle.participantStates[userId];
+            const partyDerived = getRpgDerivedStats(partyMember);
+            let raw = battle.enemy.damage * intent.multiplier;
+            if (battle.enemy.phase === 2) raw *= 1.2;
+            if (battle.enemy.phase === 3) raw *= 1.45;
+            let mitigation = partyDerived.defense * 0.2;
+            if (partyState.defending) mitigation += raw * 0.5;
+            if (partyState.statuses.some(status => status.name === 'Shielded')) mitigation += raw * 0.35;
+            const areaDamage = Math.max(1, Math.round(raw - mitigation));
+            partyState.hp = Math.max(0, partyState.hp - areaDamage);
+            battle.log.push(`💥 **${partyMember.username}** takes **${areaDamage}** area damage.`);
+            if (battle.enemy.status && Math.random() < intent.statusBoost) addRpgStatus(partyState.statuses, battle.enemy.status, 2, Math.max(3, Math.round(areaDamage * 0.12)));
+        }
+        battle.momentum = Math.max(0, Number(battle.momentum || 0) - 1);
+        battle.enemyIntent = rollRpgEnemyIntent(battle.enemy);
+        return;
+    }
+    const targetId = alive[Math.floor(Math.random() * alive.length)];
+    const target = getRpgPlayer(battle.guildId, targetId);
+    const state = battle.participantStates[targetId];
+    const derived = getRpgDerivedStats(target);
+    if (Math.random() < derived.dodgeChance) {
+        battle.log.push(`💨 **${target.username}** reads **${intent.name}** and narrowly dodges!`);
+        battle.momentum = Math.min(10, Number(battle.momentum || 0) + 1);
+        battle.enemyIntent = rollRpgEnemyIntent(battle.enemy);
+        return;
+    }
+    let raw = battle.enemy.damage * intent.multiplier * (0.85 + Math.random() * 0.3);
+    if (battle.enemy.phase === 2) raw *= 1.25;
+    if (battle.enemy.phase === 3) raw *= 1.55;
+    let mitigation = derived.defense * 0.28;
+    if (state.defending) mitigation += raw * 0.5;
+    if (state.statuses.some(status => status.name === 'Shielded')) mitigation += raw * 0.35;
+    if (state.statuses.some(status => status.name === 'Defense Buff')) mitigation += derived.defense * 0.25;
+    const damage = Math.max(1, Math.round(raw - mitigation));
+    state.hp = Math.max(0, state.hp - damage);
+    battle.log.push(`${intent.emoji} ${enemyEmoji} **${battle.enemy.name}** uses **${intent.name}** on **${target.username}** for **${damage}** damage.`);
+    if (battle.enemy.status && Math.random() < intent.statusBoost) {
+        addRpgStatus(state.statuses, battle.enemy.status, 2, Math.max(2, Math.round(damage * 0.12)));
+        battle.log.push(`${getRpgStatusEmoji(battle.enemy.status)} **${target.username}** is afflicted with **${battle.enemy.status}**.`);
+    }
+    if (state.hp <= 0) battle.log.push(`💀 **${target.username}** falls! The party must finish the fight without them.`);
+    battle.momentum = Math.max(0, Number(battle.momentum || 0) - (intent.multiplier > 1 ? 2 : 1));
+    for (const status of [...state.statuses]) status.turns -= 1;
+    state.statuses = state.statuses.filter(status => status.turns > 0);
+    battle.enemyIntent = rollRpgEnemyIntent(battle.enemy);
+}
+
+function updateRpgBossPhase(battle) {
+    const enemy = battle.enemy;
+    if (!enemy.boss) return;
+    const ratio = enemy.hp / enemy.maxHp;
+    const nextPhase = ratio <= 0.2 ? 3 : ratio <= 0.5 ? 2 : 1;
+    if (nextPhase > enemy.phase) {
+        enemy.phase = nextPhase;
+        battle.log.push(nextPhase === 3
+            ? `🔥🚨 ${getRpgEnemyEmoji(enemy)} **${enemy.name} enters an ENRAGED final phase!**`
+            : `⚠️ ${getRpgEnemyEmoji(enemy)} **${enemy.name} changes attack patterns and grows stronger!**`);
+    }
+}
+
+function damageRpgEquippedGear(player, amount = 1) {
+    for (const slot of ['weapon', 'armor']) {
+        const itemId = player.equipment?.[slot];
+        if (!itemId) continue;
+        const current = Number(player.gearDurability?.[itemId] ?? 100);
+        player.gearDurability[itemId] = Math.max(0, current - Math.max(1, amount));
+    }
+}
+
+function getRpgDropResults(enemy) {
+    const drops = [];
+    for (const [itemId, chance] of enemy.drops || []) {
+        if (Math.random() <= chance) drops.push({ itemId, quantity: 1 + (Math.random() < 0.15 ? 1 : 0) });
+    }
+    return drops;
+}
+
+function getRpgTodayKey() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function getRpgWeekKey() {
+    const now = new Date();
+    const first = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+    const day = Math.floor((now - first) / 86400000);
+    return `${now.getUTCFullYear()}-W${String(Math.ceil((day + first.getUTCDay() + 1) / 7)).padStart(2, '0')}`;
+}
+
+function ensureRpgMissions(player, type) {
+    const isDaily = type === 'daily';
+    const key = isDaily ? getRpgTodayKey() : getRpgWeekKey();
+    const existing = player[type];
+    if (existing?.key === key) return existing;
+    player[type] = isDaily
+        ? {
+            key,
+            claimed: false,
+            start: { ...player.counters },
+            requirements: { monstersDefeated: 20, contractsCompleted: 3, partsSold: 10, dungeonClears: 1, itemsCrafted: 1 },
+            rewards: { gold: 500, exp: 600, rep: 100, tokens: 1 }
+        }
+        : {
+            key,
+            claimed: false,
+            start: { ...player.counters },
+            startGuildReputation: player.guildReputation,
+            requirements: { bossesDefeated: 3, contractsCompleted: 15, dungeonClears: 5, reputationEarned: 3000, dragonsDefeated: 1 },
+            rewards: { gold: 3000, exp: 4000, rep: 500, tokens: 5 }
+        };
+    return player[type];
+}
+
+function getRpgMissionProgress(player, mission, key) {
+    if (key === 'reputationEarned') return Math.max(0, player.guildReputation - Number(mission.startGuildReputation || 0));
+    return Math.max(0, Number(player.counters[key] || 0) - Number(mission.start?.[key] || 0));
+}
+
+function completeRpgContractIfReady(player, trigger = {}) {
+    const contract = player.activeContract;
+    if (!contract) return [];
+    if (trigger.enemyId && contract.target === trigger.enemyId && ['Hunt', 'Boss', 'Dragon', 'Emergency'].includes(contract.type)) {
+        contract.progress = Math.min(contract.amount, Number(contract.progress || 0) + 1);
+    }
+    if (trigger.itemId && contract.drop === trigger.itemId && contract.type === 'Gathering') {
+        contract.progress = Math.min(contract.amount, Number(contract.progress || 0) + Number(trigger.quantity || 1));
+    }
+    if (trigger.dungeonId && contract.dungeon === trigger.dungeonId && contract.type === 'Dungeon') {
+        contract.progress = contract.amount;
+    }
+    if (Number(contract.progress || 0) < contract.amount) return [];
+    const lines = [
+        `📜 **Contract complete: ${contract.name}**`,
+        `Rewards: 🟡 ${contract.gold} Gold • ✨ ${contract.exp} EXP • 🏰 ${contract.rep} Reputation`
+    ];
+    player.gold += contract.gold;
+    player.guildReputation += contract.rep;
+    addRpgExp(player, contract.exp, lines);
+    player.counters.contractsCompleted = Number(player.counters.contractsCompleted || 0) + 1;
+    if (player.counters.contractsCompleted === 1) unlockRpgAchievement(player, 'First Contract Completed');
+    if (player.counters.contractsCompleted >= 100 && !player.titles.includes('Guild Champion')) player.titles.push('Guild Champion');
+    lines.push(getRpgNpcLine('receptionist', 'contractCompleted', player, { contract: contract.name }));
+    lines.push(getRpgNpcLine('scout', 'return', player, { contract: contract.name, location: contract.location }));
+    player.activeContract = null;
+    return lines;
+}
+
+function applyRpgVictoryRewards(ownerPlayer) {
+    const battle = ownerPlayer.activeBattle;
+    const enemy = battle.enemy;
+    const participants = battle.participants.filter(userId => Boolean(getRpgPlayer(battle.guildId, userId)));
+    const expEach = Math.max(1, Math.floor(enemy.exp / Math.max(1, participants.length)));
+    const goldEach = Math.max(1, Math.floor(enemy.gold / Math.max(1, participants.length)));
+    const sharedLog = [
+        `🏆✨ ${getRpgEnemyEmoji(enemy)} **${enemy.name} was defeated!**`,
+        `🎺 **VICTORY FANFARE!** The guild contract seal flashes gold.`,
+        `📖 *${pickRpgFlavor('victory')}*`,
+        getRpgNpcLine('bard', 'victory', ownerPlayer, { enemy: enemy.name }),
+        getRpgNpcLine('guildMaster', 'victory', ownerPlayer, { enemy: enemy.name })
+    ];
+    for (const userId of participants) {
+        const player = getRpgPlayer(battle.guildId, userId);
+        const state = battle.participantStates[userId];
+        if (!player || !state) continue;
+        player.gold += goldEach;
+        addRpgExp(player, expEach, sharedLog);
+        player.counters.monstersDefeated = Number(player.counters.monstersDefeated || 0) + 1;
+        damageRpgEquippedGear(player, enemy.boss ? 4 : battle.type === 'dungeon' ? 2 : 1);
+        if (enemy.boss) player.counters.bossesDefeated = Number(player.counters.bossesDefeated || 0) + 1;
+        if (enemy.dragon) {
+            player.counters.dragonsDefeated = Number(player.counters.dragonsDefeated || 0) + 1;
+            unlockRpgAchievement(player, 'Dragon Hunter');
+        }
+        const drops = getRpgDropResults(enemy);
+        if (!drops.length) sharedLog.push(`🍃 **${player.username}** found no material drop this time.`);
+        for (const drop of drops) {
+            addRpgInventory(player, drop.itemId, drop.quantity);
+            sharedLog.push(`🎁 **${player.username}** found ${formatRpgItem(drop.itemId, drop.quantity)} ${getRpgRarityEmoji(RPG_ITEMS[drop.itemId].rarity)}`);
+            if (['Rare', 'Epic', 'Legendary', 'Mythic'].includes(RPG_ITEMS[drop.itemId].rarity)) sharedLog.push(`✨ *${pickRpgFlavor('loot')}*`);
+            sharedLog.push(...completeRpgContractIfReady(player, { itemId: drop.itemId, quantity: drop.quantity }));
+        }
+        sharedLog.push(...completeRpgContractIfReady(player, { enemyId: enemy.id }));
+        const derived = getRpgDerivedStats(player);
+        player.currentHp = Math.max(1, Math.round(state.hp));
+        player.currentMana = Math.min(derived.maxMana, Math.round(state.mana + derived.maxMana * 0.08));
+        player.currentStamina = Math.min(derived.maxStamina, Math.round(state.stamina + derived.maxStamina * 0.12));
+        putRpgPlayer(player);
+    }
+    sharedLog.push(`🟡 **${goldEach} Gold** · ✨ **${expEach} EXP** awarded to each adventurer.`);
+    sharedLog.push(getRpgNpcLine('quartermaster', 'loot', ownerPlayer, { enemy: enemy.name }));
+    return sharedLog;
+}
+
+function advanceRpgDungeon(ownerPlayer, rewardLog) {
+    const battle = ownerPlayer.activeBattle;
+    const dungeon = RPG_DUNGEONS[battle.dungeonId];
+    if (!dungeon) return false;
+    if (battle.dungeonRoom >= 4) {
+        for (const userId of battle.participants) {
+            const player = getRpgPlayer(battle.guildId, userId);
+            if (!player) continue;
+            const difficultyData = RPG_DUNGEON_DIFFICULTIES[battle.difficulty] || RPG_DUNGEON_DIFFICULTIES.Normal;
+            const dungeonGold = Math.round(dungeon.reward.gold * difficultyData.reward);
+            const dungeonExp = Math.round(dungeon.reward.exp * difficultyData.reward);
+            player.gold += dungeonGold;
+            addRpgExp(player, dungeonExp, rewardLog);
+            player.counters.dungeonClears = Number(player.counters.dungeonClears || 0) + 1;
+            if (player.counters.dungeonClears >= 1) unlockRpgAchievement(player, 'Dungeon Conqueror');
+            rewardLog.push(...completeRpgContractIfReady(player, { dungeonId: battle.dungeonId }));
+        }
+        const difficultyData = RPG_DUNGEON_DIFFICULTIES[battle.difficulty] || RPG_DUNGEON_DIFFICULTIES.Normal;
+        rewardLog.push(`${getRpgDungeonEmoji(battle.dungeonId)}🏆 **${getRpgDifficultyEmoji(battle.difficulty)} ${battle.difficulty} ${dungeon.name} cleared!**`);
+        rewardLog.push(`🎁 Reward Chest · 🟡 ${Math.round(dungeon.reward.gold * difficultyData.reward)} Gold · ✨ ${Math.round(dungeon.reward.exp * difficultyData.reward)} EXP each.`);
+        ownerPlayer.activeBattle = null;
+        return false;
+    }
+    battle.dungeonRoom += 1;
+    if (battle.dungeonRoom === 2) {
+        const eventGold = 75 * (getRpgRankIndex(dungeon.rank) + 1);
+        for (const userId of battle.participants) {
+            const player = getRpgPlayer(battle.guildId, userId);
+            if (player) player.gold += eventGold;
+        }
+        rewardLog.push(`🗝️✨ A hidden guild cache grants **${eventGold} Gold** to every party member.`);
+    }
+    const enemyId = dungeon.enemies[battle.dungeonRoom];
+    battle.enemy = getRpgEnemy(enemyId, battle.difficultyMultiplier || 1);
+    battle.turn += 1;
+    battle.log = [...rewardLog.slice(-5), `🚪 Room ${battle.dungeonRoom + 1}/5 · ${getRpgEnemyEmoji(enemyId)} **${battle.enemy.name}** blocks the path.`];
+    for (const userId of battle.participants) {
+        const player = getRpgPlayer(battle.guildId, userId);
+        const state = battle.participantStates[userId];
+        if (!player || !state) continue;
+        const derived = getRpgDerivedStats(player);
+        state.hp = Math.min(derived.maxHp, Math.max(1, state.hp + Math.round(derived.maxHp * 0.18)));
+        state.mana = Math.min(derived.maxMana, state.mana + Math.round(derived.maxMana * 0.15));
+        state.stamina = Math.min(derived.maxStamina, state.stamina + Math.round(derived.maxStamina * 0.18));
+    }
+    return true;
+}
+
+function resolveRpgBattleRound(ownerPlayer, actorPlayer, action) {
+    const actionResult = applyRpgPlayerAction(ownerPlayer, actorPlayer, action);
+    if (!actionResult.ok || actionResult.fled || !ownerPlayer.activeBattle) return actionResult;
+    const battle = ownerPlayer.activeBattle;
+    const skipEnemy = tickRpgStatuses(battle);
+    updateRpgBossPhase(battle);
+    if (battle.enemy.hp <= 0) {
+        const rewardLog = applyRpgVictoryRewards(ownerPlayer);
+        if (battle.type === 'dungeon' && advanceRpgDungeon(ownerPlayer, rewardLog)) {
+            saveRpgStore();
+            return { ok: true, victory: true, continued: true };
+        }
+        if (ownerPlayer.activeBattle) ownerPlayer.activeBattle = null;
+        saveRpgStore();
+        return { ok: true, victory: true, rewardLog };
+    }
+    performRpgEnemyTurn(ownerPlayer, skipEnemy);
+    triggerRpgBattleEvent(battle);
+    battle.turn += 1;
+    const alive = battle.participants.some(userId => battle.participantStates[userId]?.hp > 0);
+    if (!alive) {
+        battle.log.push('💀 The party has been defeated and returns to the guild infirmary.');
+        for (const userId of battle.participants) {
+            const player = getRpgPlayer(battle.guildId, userId);
+            if (!player) continue;
+            const derived = getRpgDerivedStats(player);
+            player.currentHp = Math.max(1, Math.round(derived.maxHp * 0.35));
+            player.currentMana = Math.round(derived.maxMana * 0.4);
+            player.currentStamina = Math.round(derived.maxStamina * 0.4);
+        }
+        ownerPlayer.activeBattle = null;
+        saveRpgStore();
+        return { ok: true, defeat: true };
+    }
+    saveRpgStore();
+    return { ok: true };
+}
+
+
+function buildRpgProfileEmbed(player, user = null) {
+    normalizeRpgPlayer(player);
+    const derived = syncRpgResources(player, false);
+    const weaponId = player.equipment.weapon;
+    const armorId = player.equipment.armor;
+    const weapon = RPG_ITEMS[weaponId];
+    const armor = RPG_ITEMS[armorId];
+    const contract = player.activeContract;
+    const expNeeded = getRpgExpNeeded(player.level);
+    const nextRank = RPG_RANKS[getRpgRankIndex(player.guildRank) + 1];
+    const rankRequirement = nextRank ? RPG_RANK_REQUIREMENTS[nextRank] : player.guildReputation;
+    const healthMood = getRpgHealthMood(player.currentHp, derived.maxHp);
+    const readiness = getRpgReadiness(player);
+    const streak = Math.max(1, Number(player.activityStreak || 1));
+    const recordVoice = Math.random() < 0.55
+        ? getRpgNpcLine('receptionist', 'profile', player)
+        : getRpgNpcLine('bard', 'profile', player);
+    const embed = new EmbedBuilder()
+        .setColor(RPG_RANK_COLORS[player.guildRank] || '#9B7A3C')
+        .setTitle(`${RPG_CLASS_DATA[player.className]?.emoji || '🧙'} ${player.username} · ${getRpgRankEmoji(player.guildRank)} ${player.guildRank} Adventurer`)
+        .setDescription(`🏅 **${player.equippedTitle}**\n${readiness.emoji} **${readiness.label}:** ${readiness.detail}\n${getRpgContextTip(player)}`);
+    if (user?.displayAvatarURL) embed.setThumbnail(user.displayAvatarURL());
+    return embed.addFields(
+            { name: '🪪 Guild Identity', value: `🏅 **Title:** ${player.equippedTitle}\n${RPG_CLASS_DATA[player.className]?.emoji} **Class:** ${player.className}\n${getRpgRankEmoji(player.guildRank)} **Rank:** ${player.guildRank}`, inline: true },
+            { name: '📈 Progression', value: `⭐ **Level:** ${player.level}\n✨ **EXP:** ${player.exp}/${expNeeded}\n\`${buildRpgProgressBar(player.exp, expNeeded)}\`\n🏰 **Rep:** ${player.guildReputation}${nextRank ? `/${rankRequirement}` : ' MAX'}`, inline: true },
+            { name: `${healthMood.emoji} Resources · ${healthMood.label}`, value: `❤️ ${Math.round(player.currentHp)}/${derived.maxHp} \`${buildRpgProgressBar(player.currentHp, derived.maxHp, 8)}\`\n💙 ${Math.round(player.currentMana)}/${derived.maxMana}\n⚡ ${Math.round(player.currentStamina)}/${derived.maxStamina}\n🟡 ${player.gold} Gold`, inline: true },
+            { name: '⚔️ Combat Power', value: `⚔️ Attack: **${derived.attack}**\n🛡️ Defense: **${derived.defense}**\n💥 Critical: **${Math.round(derived.critChance * 100)}%**\n💨 Dodge: **${Math.round(derived.dodgeChance * 100)}%**`, inline: true },
+            { name: '🎒 Equipped Gear', value: `${weapon ? `${getRpgItemEmoji(weaponId, weapon)} **${weapon.name} +${getRpgItemUpgrade(player, weaponId)}** · 🔧 ${Number(player.gearDurability?.[weaponId] ?? 100)}%` : '⚔️ No weapon'}\n${armor ? `${getRpgItemEmoji(armorId, armor)} **${armor.name} +${getRpgItemUpgrade(player, armorId)}** · 🔧 ${Number(player.gearDurability?.[armorId] ?? 100)}%` : '🛡️ No armor'}`, inline: true },
+            { name: `${getRpgActivityStreakEmoji(streak)} Adventure Pulse`, value: `🔥 **${streak}-day activity streak**\n🗣️ Last action: **${player.lastRpgAction || 'visited the guild'}**\n${player.partyId ? '🤝 Party ready' : '🧭 Adventuring solo'}`, inline: true },
+            { name: '📜 Active Contract', value: contract ? `${getRpgContractEmoji(contract.type)} **${contract.name}**\n📍 ${contract.location}\nProgress: ${contract.progress || 0}/${contract.amount} \`${buildRpgProgressBar(contract.progress || 0, contract.amount, 10)}\`` : '📭 No active contract. Visit `!contracts`.', inline: false },
+            { name: '💬 Guild Commentary', value: recordVoice, inline: false }
+        )
+        .setFooter({ text: `📊 ${player.statPoints} stat point(s) · 🌟 ${player.skillPoints} skill point(s) · 🎮 !helprpg · 💬 !guildstaff` })
+        .setTimestamp();
+}
+
+function buildRpgClassSelectRow(guildId, userId) {
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`rpg_class:${guildId}:${userId}`)
+            .setPlaceholder('⚔️ Choose the path that will define your legend')
+            .addOptions(
+                new StringSelectMenuOptionBuilder().setLabel('Swordsman').setEmoji('⚔️').setDescription('Melee weapons, stamina, defense, agility, and weapon paths.').setValue('Swordsman'),
+                new StringSelectMenuOptionBuilder().setLabel('Mage').setEmoji('🔮').setDescription('Mana, elemental magic, healing, barriers, and ranged attacks.').setValue('Mage')
+            )
+    );
+}
+
+
+async function handleRpgStartCommand(message) {
+    const existing = getRpgPlayer(message.guild.id, message.author.id);
+    if (existing) {
+        await message.reply({
+            content: `📚 The Guild already has your adventurer record.\n\n${getRpgNpcLine('receptionist', 'profile', existing)}`,
+            embeds: [buildRpgProfileEmbed(existing, message.author)]
+        });
+        return;
+    }
+    const previewContext = { adventurer: message.author.username, userId: message.author.id, guildId: message.guild.id };
+    const embed = new EmbedBuilder()
+        .setColor('#9B7A3C')
+        .setTitle('🏰✨ Welcome to the Adventurer Guild')
+        .setDescription(`🔔 The guild doors open. **Welcome, rookie adventurer.** Choose the path that will define your legend.\n\n${getRpgNpcLine('receptionist', 'greeting', null, previewContext)}\n\n${getRpgNpcLine('guildMaster', 'greeting', null, previewContext)}`)
+        .addFields(
+            { name: '⚔️ Swordsman', value: '🗡️ Melee weapons\n⚡ Stamina skills\n🛡️ Blocking and defense\n💨 Dodging and critical strikes', inline: true },
+            { name: '🔮 Mage', value: '🪄 Elemental magic\n💙 Mana-powered skills\n✨ Healing and shields\n🌪️ Long-range spellcasting', inline: true },
+            { name: '🎁 Starter Pack', value: `A starter weapon, Leather Adventurer Set, potions, **150 Gold**, and your first class skill.\n\n${getRpgNpcLine('quartermaster', 'greeting', null, previewContext)}`, inline: false }
+        )
+        .setFooter({ text: '⚠️ Class selection is permanent for this profile.' })
+        .setTimestamp();
+    await message.channel.send({ embeds: [embed], components: [buildRpgClassSelectRow(message.guild.id, message.author.id)] });
+}
+
+async function handleRpgProfileCommand(message, args) {
+    const target = message.mentions.users.first() || message.author;
+    const player = getRpgPlayer(message.guild.id, target.id);
+    if (!player) return message.reply(target.id === message.author.id ? 'Use `!start` to create your adventurer first.' : 'That member has no RPG profile.');
+    const sub = String(args[0] || '').toLowerCase();
+    if (target.id === message.author.id && sub === 'title') {
+        const titleName = args.slice(1).join(' ').trim();
+        const found = player.titles.find(title => title.toLowerCase() === titleName.toLowerCase());
+        if (!found) return message.reply(`Unknown title. Your titles: ${player.titles.join(', ')}`);
+        player.equippedTitle = found;
+        saveRpgStore();
+        return message.reply(`🏅 Your equipped title is now **${found}**.\n\n${getRpgNpcLine('bard', 'titleEquip', player, { title: found })}\n\n${getRpgNpcLine('receptionist', 'profile', player)}`);
+    }
+    await message.channel.send({ embeds: [buildRpgProfileEmbed(player, target)] });
+}
+
+async function handleRpgClassCommand(message) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const data = RPG_CLASS_DATA[player.className];
+    const unlocked = data.skills.filter(skill => player.unlockedSkills.includes(skill.id));
+    await message.channel.send({
+        embeds: [new EmbedBuilder()
+            .setColor(player.className === 'Mage' ? '#6F4E9C' : '#B87333')
+            .setTitle(`${data.emoji} ${player.className} Class Path`)
+            .setDescription(`${getRpgNpcLine('guildMaster', 'skills', player)}\n\n🛤️ **Paths:** ${data.paths.map(path => `**${path}**`).join(' · ')}`)
+            .addFields(
+                { name: '✅ Unlocked Skills', value: unlocked.map(skill => `${getRpgSkillEmoji(skill)} **${skill.name}** · ${skill.cost} ${data.resource === 'mana' ? '💙 Mana' : '⚡ Stamina'}`).join('\n') || '🔒 None', inline: false },
+                { name: '🔓 Upcoming Skills', value: data.skills.filter(skill => !player.unlockedSkills.includes(skill.id)).slice(0, 6).map(skill => `${getRpgSkillEmoji(skill)} Lv.${skill.level} · **${skill.name}**`).join('\n') || '👑 Every class skill is unlocked.', inline: false }
+            )
+            .setFooter({ text: '✨ Use !skills to inspect and unlock abilities.' })
+            .setTimestamp()]
+    });
+}
+
+async function handleRpgStatsCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const stat = String(args[0] || '').toLowerCase();
+    const amount = Math.max(1, Number.parseInt(args[1] || '1', 10) || 1);
+    if (stat) {
+        if (!RPG_STAT_KEYS.includes(stat)) return message.reply(`📊 Choose a stat: ${RPG_STAT_KEYS.map(key => RPG_STAT_LABELS[key]).join(' · ')}`);
+        if (player.statPoints < amount) return message.reply(`📊 You only have **${player.statPoints}** stat point(s).\n\n${getRpgNpcLine('guildMaster', 'stats', player)}`);
+        if (amount > 100) return message.reply('⚠️ You may spend at most 100 points at once.');
+        player.stats[stat] += amount;
+        player.statPoints -= amount;
+        syncRpgResources(player, false);
+        saveRpgStore();
+        await message.reply(`✨ ${RPG_STAT_LABELS[stat]} increased by **${amount}**! New value: **${player.stats[stat]}**.\n\n${getRpgNpcLine('guildMaster', 'stats', player)}`);
+        return;
+    }
+    const descriptions = {
+        strength: 'increases melee damage', intelligence: 'increases magic damage and max mana', defense: 'reduces damage taken',
+        health: 'increases maximum HP', agility: 'increases dodge and critical chance', stamina: 'increases stamina and physical skill usage'
+    };
+    await message.channel.send({ embeds: [new EmbedBuilder()
+        .setColor('#D4AC0D')
+        .setTitle('📊✨ Adventurer Stat Crystal')
+        .setDescription(`${getRpgNpcLine('guildMaster', 'stats', player)}\n\n${RPG_STAT_KEYS.map(key => `${RPG_STAT_LABELS[key]} · **${player.stats[key]}**\n└ ${descriptions[key]}`).join('\n\n')}`)
+        .setFooter({ text: `${player.statPoints} unspent point(s) · !stats stat amount` })
+        .setTimestamp()] });
+}
+
+async function handleRpgSkillsCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const classData = RPG_CLASS_DATA[player.className];
+    const skills = classData.skills;
+    if (String(args[0] || '').toLowerCase() === 'unlock') {
+        const query = args.slice(1).join(' ').trim().toLowerCase();
+        const index = Number.parseInt(query, 10);
+        const skill = Number.isFinite(index) ? skills[index - 1] : skills.find(entry => entry.id === query.replace(/\s+/g, '_') || entry.name.toLowerCase() === query);
+        if (!skill) return message.reply('🔍 Skill not found. Use `!skills` to view your skill tree.');
+        if (player.unlockedSkills.includes(skill.id)) return message.reply(`✅ ${getRpgSkillEmoji(skill)} **${skill.name}** is already unlocked.`);
+        if (player.level < skill.level) return message.reply(`🔒 You must reach **Level ${skill.level}** to unlock ${getRpgSkillEmoji(skill)} **${skill.name}**.\n\n${getRpgNpcLine('guildMaster', 'skills', player)}`);
+        if (player.skillPoints < 1) return message.reply(`✨ You do not have a skill point available.\n\n${getRpgNpcLine('guildMaster', 'training', player)}`);
+        player.skillPoints -= 1;
+        player.unlockedSkills.push(skill.id);
+        saveRpgStore();
+        return message.reply(`🌟 New ability unlocked: ${getRpgSkillEmoji(skill)} **${skill.name}**!\n\n${getRpgNpcLine('guildMaster', 'skills', player)}`);
+    }
+    await message.channel.send({ embeds: [new EmbedBuilder()
+        .setColor(player.className === 'Mage' ? '#6F4E9C' : '#B87333')
+        .setTitle(`${classData.emoji}✨ ${player.className} Skill Tree`)
+        .setDescription(`${getRpgNpcLine('guildMaster', 'skills', player)}\n\n${skills.map((skill, index) => {
+            const state = player.unlockedSkills.includes(skill.id) ? '✅' : player.level >= skill.level ? '🔓' : '🔒';
+            const resourceEmoji = classData.resource === 'mana' ? '💙' : '⚡';
+            return `${state} ${getRpgSkillEmoji(skill)} **${index + 1}. ${skill.name}** · Lv.${skill.level} · ${resourceEmoji} ${skill.cost}${skill.effect ? ` · ${getRpgStatusEmoji(skill.effect)} ${skill.effect}` : ''}`;
+        }).join('\n')}`.slice(0, 4096))
+        .setFooter({ text: `${player.skillPoints} skill point(s) · !skills unlock number-or-name` })
+        .setTimestamp()] });
+}
+
+function buildRpgGuildEmbed(player) {
+    const nextRank = RPG_RANKS[getRpgRankIndex(player.guildRank) + 1];
+    const requirement = nextRank ? RPG_RANK_REQUIREMENTS[nextRank] : null;
+    const readiness = getRpgReadiness(player);
+    const streak = Math.max(1, Number(player.activityStreak || 1));
+    return new EmbedBuilder()
+        .setColor(RPG_RANK_COLORS[player.guildRank])
+        .setTitle(`🏰✨ Adventurer Guild Hall · ${getRpgRankEmoji(player.guildRank)} ${player.guildRank}`)
+        .setDescription(`🔔 Welcome, **${player.equippedTitle} ${player.username}**. ${pickRpgFlavor('guild')}\n\n${getRpgGuildNpcLine(player)}\n\n${getRpgGuildAmbientLine(player)}`)
+        .addFields(
+            { name: '📜 Guild Record', value: `${getRpgRankEmoji(player.guildRank)} Rank: **${player.guildRank}**\n🏰 Reputation: **${player.guildReputation}**${nextRank ? `/${requirement}\n\`${buildRpgProgressBar(player.guildReputation, requirement)}\`` : ' · MAX'}`, inline: true },
+            { name: '🎯 Current Contract', value: player.activeContract ? `${getRpgContractEmoji(player.activeContract.type)} **${player.activeContract.name}**\n${player.activeContract.progress || 0}/${player.activeContract.amount} complete` : '📭 None accepted.', inline: true },
+            { name: `${readiness.emoji} Adventure Readiness`, value: `**${readiness.label}**\n${readiness.detail}`, inline: true },
+            { name: '🧭 Guild Services', value: '📜 Contract Board · 🎒 Quartermaster · 🧪 Alchemist · 🔨 Forge · 🪪 Records', inline: false },
+            { name: `${getRpgActivityStreakEmoji(streak)} Living World`, value: `🔥 ${streak}-day activity streak · ${RPG_EMOJIS.npcs.bard} Guild rumors change every visit · 🎲 Random events can occur during battle`, inline: false },
+            { name: '💬 Meet the Guild Staff', value: '`!guildstaff` opens the complete NPC roster. Select anyone repeatedly to hear fresh, context-aware dialogue.', inline: false },
+            { name: '💡 Guild Assistant', value: getRpgContextTip(player), inline: false }
+        )
+        .setFooter({ text: 'Use the navigation and quick-action buttons below.' })
+        .setTimestamp();
+}
+
+function buildRpgGuildNavigationRow(player) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`rpg_menu:${player.guildId}:${player.userId}:contracts`).setLabel('Contracts').setEmoji('📜').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`rpg_menu:${player.guildId}:${player.userId}:inventory`).setLabel('Inventory').setEmoji('🎒').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`rpg_menu:${player.guildId}:${player.userId}:shop`).setLabel('Shop').setEmoji('🧪').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`rpg_menu:${player.guildId}:${player.userId}:blacksmith`).setLabel('Forge').setEmoji('🔨').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`rpg_menu:${player.guildId}:${player.userId}:profile`).setLabel('Profile').setEmoji('🪪').setStyle(ButtonStyle.Secondary)
+    );
+}
+
+function buildRpgGuildQuickRow(player) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`rpg_quick:${player.guildId}:${player.userId}:hunt`).setLabel('Hunt').setEmoji('⚔️').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`rpg_quick:${player.guildId}:${player.userId}:daily`).setLabel('Daily').setEmoji('☀️').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`rpg_quick:${player.guildId}:${player.userId}:weekly`).setLabel('Weekly').setEmoji('🌙').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`rpg_quick:${player.guildId}:${player.userId}:party`).setLabel('Party').setEmoji('🤝').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`rpg_quick:${player.guildId}:${player.userId}:refresh`).setLabel('Refresh').setEmoji('🔄').setStyle(ButtonStyle.Secondary)
+    );
+}
+
+
+async function handleRpgGuildCommand(message) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    touchRpgPlayer(player, 'visited the Guild Hall');
+    saveRpgStore();
+    await message.channel.send({ embeds: [buildRpgGuildEmbed(player)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+}
+
+function buildRpgContractsEmbed(player) {
+    const contracts = RPG_CONTRACTS[player.guildRank] || [];
+    const npcIntro = [
+        getRpgNpcLine('receptionist', 'contractBoard', player),
+        getRpgNpcLine('scout', 'contractBoard', player)
+    ].join('\n\n');
+    const contractText = contracts.map((contract, index) => [
+        `${getRpgContractEmoji(contract.type)} **${index + 1}. ${contract.name}**`,
+        `🏷️ ${contract.type} · ⭐ Recommended Lv.${contract.level} · 📍 ${contract.location}`,
+        `🎯 Objective: ${contract.amount} · 🟡 ${contract.gold} Gold · ✨ ${contract.exp} EXP · 🏰 ${contract.rep} Rep`
+    ].join('\n')).join('\n\n');
+    return new EmbedBuilder()
+        .setColor(RPG_RANK_COLORS[player.guildRank])
+        .setTitle(`📜 ${getRpgRankEmoji(player.guildRank)} ${player.guildRank} Guild Contract Board`)
+        .setDescription(`${npcIntro}\n\n${contractText}`.slice(0, 4096))
+        .setFooter({ text: player.activeContract ? `📌 Active: ${player.activeContract.name}` : 'Select below or use !accept number.' })
+        .setTimestamp();
+}
+
+function buildRpgContractSelectRow(player) {
+    const contracts = RPG_CONTRACTS[player.guildRank] || [];
+    return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`rpg_contract:${player.guildId}:${player.userId}`)
+            .setPlaceholder('📜 Select a guild contract to accept')
+            .addOptions(contracts.map(contract => new StringSelectMenuOptionBuilder()
+                .setLabel(contract.name.slice(0, 100))
+                .setDescription(`${contract.type} · Lv.${contract.level} · ${contract.rep} Reputation`.slice(0, 100))
+                .setValue(contract.id)
+                .setEmoji(getRpgContractEmoji(contract.type))))
+    );
+}
+
+
+async function handleRpgContractsCommand(message) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const components = [];
+    if (!player.activeContract) components.push(buildRpgContractSelectRow(player));
+    components.push(buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player));
+    await message.channel.send({ embeds: [buildRpgContractsEmbed(player)], components });
+}
+
+function acceptRpgContract(player, contract) {
+    if (player.activeContract) return { ok: false, message: `You already have an active contract: **${player.activeContract.name}**.` };
+    if (player.level + 5 < contract.level) return { ok: false, message: `Warning: this contract is far above your current level. Reach level ${contract.level - 5} before accepting it.` };
+    player.activeContract = { ...contract, progress: 0, acceptedAt: Date.now() };
+    saveRpgStore();
+    return { ok: true };
+}
+
+
+async function handleRpgAcceptCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const contract = getRpgContractByInput(player, args.join(' '));
+    if (!contract) {
+        return message.reply(`📜 Choose a contract number from \`!contracts\`, for example \`!accept 1\`.\n\n${getRpgNpcLine('receptionist', 'contractsWaiting', player, { rank: `${getRpgRankEmoji(player.guildRank)} ${player.guildRank}` })}`);
+    }
+    const result = acceptRpgContract(player, contract);
+    if (!result.ok) {
+        return message.reply(`⚠️ ${result.message}\n\n${getRpgNpcLine('receptionist', 'contractDenied', player, { reason: result.message })}`);
+    }
+    await message.channel.send({ embeds: [new EmbedBuilder()
+        .setColor(RPG_RANK_COLORS[player.guildRank])
+        .setTitle(`${getRpgContractEmoji(contract.type)} Contract Accepted!`)
+        .setDescription(`📜 **${contract.name}**\n📍 Travel to **${contract.location}**\n🎯 Complete **${contract.amount}** objective(s).\n\n${getRpgNpcLine('receptionist', 'contractAccepted', player, { contract: contract.name })}\n\n${getRpgNpcLine('scout', 'targetLocated', player, { contract: contract.name, location: contract.location })}`)
+        .addFields({ name: '🎁 Completion Rewards', value: `🟡 ${contract.gold} Gold · ✨ ${contract.exp} EXP · 🏰 ${contract.rep} Reputation`, inline: false })
+        .setFooter({ text: 'The Guild Receptionist added the sealed contract to your profile.' })
+        .setTimestamp()] });
+}
+
+async function handleRpgAbandonCommand(message) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (!player.activeContract) {
+        return message.reply(`📭 You do not have an active contract.\n\n${getRpgNpcLine('receptionist', 'contractsWaiting', player, { rank: `${getRpgRankEmoji(player.guildRank)} ${player.guildRank}` })}`);
+    }
+    const name = player.activeContract.name;
+    player.activeContract = null;
+    saveRpgStore();
+    await message.reply(`📜💨 You abandoned **${name}**. The guild issued no rewards or penalties.\n\n${getRpgNpcLine('receptionist', 'contractAbandoned', player, { contract: name })}\n\n${getRpgNpcLine('guildMaster', 'defeat', player)}`);
+}
+
+function checkRpgCooldown(player, key, duration) {
+    const now = Date.now();
+    const readyAt = Number(player.cooldowns[key] || 0);
+    if (readyAt > now) return readyAt - now;
+    player.cooldowns[key] = now + duration;
+    return 0;
+}
+
+function formatRpgDuration(milliseconds) {
+    const seconds = Math.max(1, Math.ceil(milliseconds / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+async function sendRpgBattleMessage(message, ownerPlayer) {
+    await message.channel.send({ embeds: [buildRpgBattleEmbed(ownerPlayer)], components: buildRpgBattleRows(ownerPlayer) });
+}
+
+async function handleRpgHuntCommand(message) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (getRpgBattleOwner(message.guild.id, message.author.id)) return message.reply('⚔️ You are already in battle. Use `!battle` to return to the fight.');
+    if (!player.activeContract) return message.reply(`📜 Accept a guild contract first with \`!contracts\`.\n\n${getRpgNpcLine('receptionist', 'contractsWaiting', player)}`);
+    if (!['Hunt', 'Gathering'].includes(player.activeContract.type)) return message.reply(`This is a **${player.activeContract.type}** contract. Use the matching command such as **!boss** or **!dungeon**.`);
+    const party = getRpgParty(player);
+    if (party && party.leaderId !== player.userId) return message.reply('Only the party leader can begin a shared hunt.');
+    const remaining = checkRpgCooldown(player, 'hunt', RPG_HUNT_COOLDOWN_MS);
+    if (remaining) return message.reply(`⏳ Your hunt cooldown ends in **${formatRpgDuration(remaining)}**.`);
+    const battle = createRpgBattle(player, player.activeContract.target, { type: 'hunt' });
+    battle.log.push(`📜 Contract progress: ${player.activeContract.progress || 0}/${player.activeContract.amount}`);
+    battle.log.push(getRpgNpcLine('scout', 'huntStart', player, { location: player.activeContract.location }));
+    saveRpgStore();
+    await sendRpgBattleMessage(message, player);
+}
+
+async function handleRpgBattleCommand(message, args) {
+    const ownerPlayer = getRpgBattleOwner(message.guild.id, message.author.id);
+    if (!ownerPlayer) return message.reply('⚔️ You do not have an active battle. Use `!hunt`, `!boss`, or `!dungeon`.');
+    const action = String(args[0] || '').toLowerCase();
+    if (['attack', 'skill', 'defend', 'potion', 'flee'].includes(action)) {
+        const actor = getRpgPlayer(message.guild.id, message.author.id);
+        const result = resolveRpgBattleRound(ownerPlayer, actor, action);
+        if (!result.ok) return message.reply(result.message);
+        if (result.victory && !ownerPlayer.activeBattle) {
+            await message.channel.send({ embeds: [new EmbedBuilder().setColor('#F1C40F').setTitle('🏆✨ Victory!').setDescription((result.rewardLog || ['Victory!']).join('\n').slice(0, 4096)).setTimestamp()] });
+            return;
+        }
+        if (result.defeat || result.fled) {
+            const line = result.defeat
+                ? `${getRpgNpcLine('guildMaster', 'defeat', actor)}\n\n${getRpgNpcLine('receptionist', 'recovery', actor)}`
+                : getRpgNpcLine('scout', 'return', actor);
+            return message.reply(`${result.defeat ? '💀 The party was defeated and returned to the guild.' : '🏃 You escaped the battle.'}\n\n${line}`);
+        }
+    }
+    if (ownerPlayer.activeBattle) await sendRpgBattleMessage(message, ownerPlayer);
+}
+
+function getRpgInventoryPages(player) {
+    const groups = [
+        ['Weapons', item => item.type === 'weapon'],
+        ['Armor & Accessories', item => item.type === 'armor' || item.type === 'accessory'],
+        ['Potions', item => item.type === 'potion'],
+        ['Monster Parts & Materials', item => item.type === 'part' || item.type === 'material']
+    ];
+    return groups.map(([title, predicate]) => ({
+        title,
+        items: Object.entries(player.inventory)
+            .filter(([itemId, quantity]) => quantity > 0 && RPG_ITEMS[itemId] && predicate(RPG_ITEMS[itemId]))
+            .map(([itemId, quantity]) => ({ itemId, quantity, ...RPG_ITEMS[itemId] }))
+    }));
+}
+
+
+function buildRpgInventoryEmbed(player, page = 0) {
+    const pages = getRpgInventoryPages(player);
+    const normalized = Math.min(Math.max(Number(page) || 0, 0), pages.length - 1);
+    const data = pages[normalized];
+    const lines = data.items.map(item => {
+        const upgrade = getRpgItemUpgrade(player, item.itemId);
+        const rarity = `${getRpgRarityEmoji(item.rarity)} ${item.rarity}`;
+        const details = item.type === 'weapon' ? `⚔️ ${item.attack || 0} ATK` : item.type === 'armor' ? `🛡️ ${item.defense || 0} DEF` : item.type === 'potion' ? '🧪 Consumable' : `🟡 ${item.sell || 0} sell`;
+        return `${getRpgItemEmoji(item.itemId, item)} **${item.name}** ×${item.quantity}${upgrade ? ` · ⚒️ +${upgrade}` : ''}\n└ ${rarity} · ${details}`;
+    });
+    const quartermasterLine = getRpgNpcLine('quartermaster', 'inventory', player);
+    return new EmbedBuilder()
+        .setColor(data.items[0] ? RPG_RARITY_COLORS[data.items[0].rarity] || '#8E6E3B' : '#8E6E3B')
+        .setTitle(`🎒✨ ${data.title}`)
+        .setDescription(`${quartermasterLine}\n\n${lines.join('\n\n') || '📭 This inventory section is empty.'}`.slice(0, 4096))
+        .setFooter({ text: `Page ${normalized + 1}/${pages.length} · 🟡 ${player.gold} Gold · !inventory use item` })
+        .setTimestamp();
+}
+
+function buildRpgInventoryRow(player, page = 0) {
+    const max = getRpgInventoryPages(player).length - 1;
+    const normalized = Math.min(Math.max(Number(page) || 0, 0), max);
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`rpg_inv:${player.guildId}:${player.userId}:${Math.max(0, normalized - 1)}`).setLabel('Previous').setEmoji('⬅️').setStyle(ButtonStyle.Secondary).setDisabled(normalized === 0),
+        new ButtonBuilder().setCustomId(`rpg_inv:${player.guildId}:${player.userId}:${Math.min(max, normalized + 1)}`).setLabel('Next').setEmoji('➡️').setStyle(ButtonStyle.Primary).setDisabled(normalized === max)
+    );
+}
+
+async function handleRpgInventoryCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (String(args[0] || '').toLowerCase() === 'use') {
+        const query = args.slice(1).join(' ').toLowerCase().trim();
+        const itemId = Object.keys(player.inventory).find(id => id === query.replace(/\s+/g, '_') || RPG_ITEMS[id]?.name.toLowerCase() === query);
+        const item = RPG_ITEMS[itemId];
+        if (!item || item.type !== 'potion') return message.reply(`🧪 You do not own that potion.\n\n${getRpgNpcLine('quartermaster', 'inventory', player)}`);
+        if (getRpgBattleOwner(message.guild.id, message.author.id)) return message.reply('🧪 Use the **Potion** battle button during combat.');
+        const derived = getRpgDerivedStats(player);
+        removeRpgInventory(player, itemId, 1);
+        if (item.heal) player.currentHp = Math.min(derived.maxHp, player.currentHp + item.heal);
+        if (item.mana) player.currentMana = Math.min(derived.maxMana, player.currentMana + item.mana);
+        if (item.stamina) player.currentStamina = Math.min(derived.maxStamina, player.currentStamina + item.stamina);
+        saveRpgStore();
+        return message.reply(`${getRpgItemEmoji(itemId, item)}✨ Used **${item.name}**.\n\n${getRpgNpcLine('alchemist', 'potionUse', player, { item: item.name })}\n\n${getRpgNpcLine('quartermaster', 'useItem', player, { item: item.name })}`);
+    }
+    const page = Math.max(0, (Number.parseInt(args[0] || '1', 10) || 1) - 1);
+    await message.channel.send({ embeds: [buildRpgInventoryEmbed(player, page)], components: [buildRpgInventoryRow(player, page)] });
+}
+
+async function handleRpgEquipmentCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (String(args[0] || '').toLowerCase() === 'equip') {
+        const query = args.slice(1).join(' ').toLowerCase().trim();
+        const itemId = Object.keys(player.inventory).find(id => id === query.replace(/\s+/g, '_') || RPG_ITEMS[id]?.name.toLowerCase() === query);
+        const item = RPG_ITEMS[itemId];
+        if (!item || !['weapon', 'armor', 'accessory'].includes(item.type)) return message.reply(`🎒 You do not own that equippable item.\n\n${getRpgNpcLine('quartermaster', 'equipment', player)}`);
+        if (item.class && item.class !== player.className) return message.reply(`🚫 Only a ${RPG_CLASS_DATA[item.class]?.emoji || '🧙'} **${item.class}** can equip that item.`);
+        player.equipment[item.slot] = itemId;
+        if (!Object.prototype.hasOwnProperty.call(player.gearDurability, itemId)) player.gearDurability[itemId] = 100;
+        syncRpgResources(player, false);
+        saveRpgStore();
+        return message.reply(`${getRpgItemEmoji(itemId, item)}✨ Equipped **${item.name}** in your **${item.slot}** slot.\n\n${getRpgNpcLine('quartermaster', 'equipSuccess', player, { item: item.name, slot: item.slot })}`);
+    }
+    const weaponId = player.equipment.weapon;
+    const armorId = player.equipment.armor;
+    const weapon = RPG_ITEMS[weaponId];
+    const armor = RPG_ITEMS[armorId];
+    await message.channel.send({ embeds: [new EmbedBuilder().setColor('#7F8C8D').setTitle('🛡️⚔️ Equipped Adventurer Gear')
+        .setDescription(getRpgNpcLine('quartermaster', 'equipment', player))
+        .addFields(
+            { name: '⚔️ Weapon', value: weapon ? `${getRpgItemEmoji(weaponId, weapon)} **${weapon.name} +${getRpgItemUpgrade(player, weaponId)}**\n💥 Attack: ${weapon.attack || 0} · 🔧 Durability: ${Number(player.gearDurability?.[weaponId] ?? 100)}%\n${getRpgRarityEmoji(weapon.rarity)} ${weapon.rarity}` : '📭 None', inline: true },
+            { name: '🛡️ Armor', value: armor ? `${getRpgItemEmoji(armorId, armor)} **${armor.name} +${getRpgItemUpgrade(player, armorId)}**\n🛡️ Defense: ${armor.defense || 0} · 🔧 Durability: ${Number(player.gearDurability?.[armorId] ?? 100)}%\n${getRpgRarityEmoji(armor.rarity)} ${armor.rarity}` : '📭 None', inline: true }
+        ).setFooter({ text: 'Equip owned gear with !equipment equip item-name' }).setTimestamp()] });
+}
+
+async function handleRpgShopCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (String(args[0] || '').toLowerCase() === 'buy') {
+        const quantity = Math.max(1, Math.min(99, Number.parseInt(args.at(-1) || '1', 10) || 1));
+        const queryParts = args.slice(1, Number.isFinite(Number.parseInt(args.at(-1), 10)) ? -1 : undefined);
+        const query = queryParts.join(' ').toLowerCase().trim();
+        const itemId = Object.keys(RPG_ITEMS).find(id => RPG_ITEMS[id].type === 'potion' && (id === query.replace(/\s+/g, '_') || RPG_ITEMS[id].name.toLowerCase() === query));
+        const item = RPG_ITEMS[itemId];
+        if (!item) return message.reply(`🔍 Potion not found. Use \`!shop\` to view supplies.\n\n${getRpgNpcLine('alchemist', 'shopOpen', player)}`);
+        const cost = item.price * quantity;
+        if (player.gold < cost) return message.reply(`🪙 You need **${cost} Gold**, but only have **${player.gold}**.\n\n${getRpgNpcLine('alchemist', 'purchaseDenied', player, { item: item.name, quantity, gold: cost })}`);
+        player.gold -= cost;
+        addRpgInventory(player, itemId, quantity);
+        saveRpgStore();
+        return message.reply(`${getRpgItemEmoji(itemId, item)}🛍️ Purchased **${quantity}× ${item.name}** for **${cost} Gold**. 🟡\n\n${getRpgNpcLine('alchemist', 'purchaseSuccess', player, { item: item.name, quantity, gold: cost })}`);
+    }
+    await message.channel.send({ embeds: [buildRpgShopEmbed(player)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+}
+
+function buildRpgShopEmbed(player) {
+    const potions = Object.entries(RPG_ITEMS).filter(([, item]) => item.type === 'potion');
+    const stock = potions.map(([id, item]) => `${getRpgItemEmoji(id, item)} **${item.name}** · ${getRpgRarityEmoji(item.rarity)} ${item.rarity}\n🟡 ${item.price} Gold · \`!shop buy ${id} 1\``).join('\n\n');
+    return new EmbedBuilder()
+        .setColor('#27AE60')
+        .setTitle('🧪✨ Guild Alchemist Shop')
+        .setDescription(`${getRpgNpcLine('alchemist', 'shopOpen', player)}\n\n${stock}`.slice(0, 4096))
+        .setFooter({ text: `Your purse: 🟡 ${player.gold} Gold · Stock refreshes continuously.` })
+        .setTimestamp();
+}
+
+function getRpgRecipeText(recipe) {
+    return Object.entries(recipe.materials).map(([id, quantity]) => `${getRpgItemEmoji(id, RPG_ITEMS[id])} ${quantity}× ${RPG_ITEMS[id]?.name || id}`).join(' · ');
+}
+
+
+async function handleRpgBlacksmithCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const action = String(args[0] || '').toLowerCase();
+    if (action === 'craft') {
+        const query = args.slice(1).join(' ').toLowerCase().trim();
+        const itemId = Object.keys(RPG_RECIPES).find(id => id === query.replace(/\s+/g, '_') || RPG_ITEMS[id]?.name.toLowerCase() === query);
+        const recipe = RPG_RECIPES[itemId];
+        const item = RPG_ITEMS[itemId];
+        if (!recipe || !item) return message.reply(`📜 Recipe not found. Use \`!blacksmith\` to view recipes.\n\n${getRpgNpcLine('blacksmith', 'forgeOpen', player)}`);
+        if (item.class && item.class !== player.className) return message.reply(`🚫 That recipe is intended for ${RPG_CLASS_DATA[item.class]?.emoji || '🧙'} **${item.class}** adventurers.`);
+        if (player.gold < recipe.gold) return message.reply(`🟡 You need **${recipe.gold} Gold** to light the forge.\n\n${getRpgNpcLine('blacksmith', 'craftDenied', player, { reason: `${recipe.gold} Gold` })}`);
+        const missing = Object.entries(recipe.materials).filter(([id, quantity]) => Number(player.inventory[id] || 0) < quantity);
+        if (missing.length) {
+            const missingText = missing.map(([id, quantity]) => `${getRpgItemEmoji(id, RPG_ITEMS[id])} ${quantity - Number(player.inventory[id] || 0)}× ${RPG_ITEMS[id].name}`).join(' · ');
+            return message.reply(`📦 Missing materials: ${missingText}\n\n${getRpgNpcLine('blacksmith', 'missingMaterials', player, { reason: missingText })}`);
+        }
+        player.gold -= recipe.gold;
+        for (const [id, quantity] of Object.entries(recipe.materials)) removeRpgInventory(player, id, quantity);
+        addRpgInventory(player, itemId, 1);
+        if (!Object.prototype.hasOwnProperty.call(player.gearDurability, itemId) && ['weapon', 'armor'].includes(item.type)) player.gearDurability[itemId] = 100;
+        player.counters.itemsCrafted = Number(player.counters.itemsCrafted || 0) + 1;
+        if (player.counters.itemsCrafted === 1) unlockRpgAchievement(player, 'First Crafted Weapon');
+        saveRpgStore();
+        return message.reply(`🔨🔥 The forge erupts in sparks—${getRpgItemEmoji(itemId, item)} **${item.name}** has been crafted!\n\n${getRpgNpcLine('blacksmith', 'craftSuccess', player, { item: item.name })}`);
+    }
+    if (action === 'upgrade') {
+        const slot = String(args[1] || 'weapon').toLowerCase();
+        if (!['weapon', 'armor'].includes(slot)) return message.reply('⚒️ Use `!blacksmith upgrade weapon` or `!blacksmith upgrade armor`.');
+        const itemId = player.equipment[slot];
+        if (!itemId) return message.reply(`📭 You have no equipped ${slot}.\n\n${getRpgNpcLine('quartermaster', 'equipment', player)}`);
+        const level = getRpgItemUpgrade(player, itemId);
+        if (level >= 15) return message.reply(`👑 That gear is already at the **+15** upgrade limit.\n\n${getRpgNpcLine('blacksmith', 'ambient', player)}`);
+        const cost = 100 * (level + 1) * (getRpgRankIndex(player.guildRank) + 1);
+        if (player.gold < cost) return message.reply(`🟡 Upgrading costs **${cost} Gold**.\n\n${getRpgNpcLine('blacksmith', 'craftDenied', player, { reason: `${cost} Gold` })}`);
+        player.gold -= cost;
+        player.gearUpgrades[itemId] = level + 1;
+        player.counters.itemsCrafted = Number(player.counters.itemsCrafted || 0) + 1;
+        saveRpgStore();
+        return message.reply(`⚒️✨ ${getRpgItemEmoji(itemId, RPG_ITEMS[itemId])} **${RPG_ITEMS[itemId].name}** is now **+${level + 1}**!\n\n${getRpgNpcLine('blacksmith', 'upgradeSuccess', player, { item: RPG_ITEMS[itemId].name, level: level + 1 })}`);
+    }
+    if (action === 'repair') {
+        const equippedIds = ['weapon', 'armor'].map(slot => player.equipment[slot]).filter(Boolean);
+        const missing = equippedIds.reduce((total, itemId) => total + Math.max(0, 100 - Number(player.gearDurability?.[itemId] ?? 100)), 0);
+        if (missing <= 0) return message.reply(`🔧✨ Your equipped gear is already at full durability.\n\n${getRpgNpcLine('blacksmith', 'repairNotNeeded', player)}`);
+        const cost = missing * 2 * (getRpgRankIndex(player.guildRank) + 1);
+        if (player.gold < cost) return message.reply(`🟡 Repairing your equipped gear costs **${cost} Gold**.\n\n${getRpgNpcLine('blacksmith', 'craftDenied', player, { reason: `${cost} Gold` })}`);
+        player.gold -= cost;
+        for (const itemId of equippedIds) player.gearDurability[itemId] = 100;
+        saveRpgStore();
+        return message.reply(`🔧✨ The blacksmith restored your equipped gear to **100% durability** for **${cost} Gold**.\n\n${getRpgNpcLine('blacksmith', 'repairSuccess', player)}`);
+    }
+    await message.channel.send({ embeds: [buildRpgBlacksmithEmbed(player)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+}
+
+function buildRpgBlacksmithEmbed(player) {
+    const recipes = Object.entries(RPG_RECIPES).filter(([id]) => !RPG_ITEMS[id].class || RPG_ITEMS[id].class === player.className).slice(0, 18);
+    const recipeText = recipes.map(([id, recipe]) => `${getRpgItemEmoji(id, RPG_ITEMS[id])} **${RPG_ITEMS[id].name}** · ${getRpgRarityEmoji(RPG_ITEMS[id].rarity)} ${RPG_ITEMS[id].rarity}\n🟡 ${recipe.gold} Gold · ${getRpgRecipeText(recipe)}\n\`!blacksmith craft ${id}\``).join('\n\n');
+    return new EmbedBuilder()
+        .setColor('#A04000')
+        .setTitle('🔨🔥 Guild Blacksmith Forge')
+        .setDescription(`${getRpgNpcLine('blacksmith', 'forgeOpen', player)}\n\n${recipeText}`.slice(0, 4096))
+        .setFooter({ text: '⚒️ Upgrade: !blacksmith upgrade weapon/armor · 🔧 Repair: !blacksmith repair' })
+        .setTimestamp();
+}
+
+async function executeRpgSale(messageOrInteraction, player, itemId, quantity) {
+    const item = RPG_ITEMS[itemId];
+    if (!item || !['part', 'material'].includes(item.type)) {
+        return {
+            ok: false,
+            message: `🏰 Only monster parts and materials can be sold at the guild exchange.\n\n${getRpgNpcLine('receptionist', 'saleCancelled', player)}`
+        };
+    }
+    const owned = Number(player.inventory[itemId] || 0);
+    const sellQuantity = quantity === 'all' ? owned : Math.max(1, Number(quantity || 1));
+    if (owned < sellQuantity) {
+        return {
+            ok: false,
+            message: `🎒 You only own **${owned}× ${item.name}**.\n\n${getRpgNpcLine('receptionist', 'saleCancelled', player)}`
+        };
+    }
+    removeRpgInventory(player, itemId, sellQuantity);
+    const value = item.sell * sellQuantity;
+    player.gold += value;
+    player.counters.partsSold = Number(player.counters.partsSold || 0) + sellQuantity;
+    if (player.counters.partsSold >= 1) unlockRpgAchievement(player, 'First Monster Part Sold');
+    saveRpgStore();
+    return {
+        ok: true,
+        message: `🏰🪙 Sold ${getRpgItemEmoji(itemId, item)} **${sellQuantity}× ${item.name}** for **${value} Gold**. 🟡\n\n${getRpgNpcLine('receptionist', 'sale', player, { item: item.name, quantity: sellQuantity, gold: value })}\n\n${getRpgNpcLine('quartermaster', 'loot', player, { item: item.name, quantity: sellQuantity })}`
+    };
+}
+
+async function handleRpgSellCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (String(args[0] || '').toLowerCase() === 'allcommon') {
+        let total = 0;
+        let quantity = 0;
+        for (const [itemId, owned] of Object.entries({ ...player.inventory })) {
+            const item = RPG_ITEMS[itemId];
+            if (!item || !['part', 'material'].includes(item.type) || item.rarity !== 'Common') continue;
+            total += item.sell * owned;
+            quantity += owned;
+            removeRpgInventory(player, itemId, owned);
+        }
+        player.gold += total;
+        player.counters.partsSold = Number(player.counters.partsSold || 0) + quantity;
+        if (quantity > 0) unlockRpgAchievement(player, 'First Monster Part Sold');
+        saveRpgStore();
+        return message.reply(quantity
+            ? `🟡 Sold **${quantity} common parts** for **${total} Gold**.\n\n${getRpgNpcLine('receptionist', 'sale', player, { item: 'common monster parts', quantity, gold: total })}`
+            : `You have no common monster parts to sell.\n\n${getRpgNpcLine('receptionist', 'saleCancelled', player)}`);
+    }
+    const possibleQuantity = args.at(-1);
+    const quantity = possibleQuantity === 'all' ? 'all' : Math.max(1, Number.parseInt(possibleQuantity || '1', 10) || 1);
+    const hasQuantity = possibleQuantity === 'all' || Number.isFinite(Number.parseInt(possibleQuantity, 10));
+    const query = args.slice(0, hasQuantity ? -1 : undefined).join(' ').toLowerCase().trim();
+    const itemId = Object.keys(player.inventory).find(id => id === query.replace(/\s+/g, '_') || RPG_ITEMS[id]?.name.toLowerCase() === query);
+    const item = RPG_ITEMS[itemId];
+    if (!item) {
+        return message.reply(`Use \`!sell item-name quantity\` or \`!sell allcommon\`.\n\n${getRpgNpcLine('receptionist', 'saleCancelled', player)}`);
+    }
+    if (['Rare', 'Epic', 'Legendary', 'Mythic'].includes(item.rarity)) {
+        const token = crypto.randomBytes(5).toString('hex');
+        rpgPendingSales.set(token, {
+            guildId: message.guild.id,
+            userId: message.author.id,
+            itemId,
+            quantity,
+            expiresAt: Date.now() + 60000
+        });
+        return message.reply({
+            content: `⚠️ **${item.name}** is ${item.rarity}. Confirm this sale?\n\n${getRpgNpcLine('receptionist', 'saleReview', player, { item: item.name, rarity: item.rarity })}`,
+            components: [new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`rpg_sale:${token}:yes`).setLabel('Confirm Sale').setEmoji('🪙').setStyle(ButtonStyle.Danger),
+                new ButtonBuilder().setCustomId(`rpg_sale:${token}:no`).setLabel('Keep Material').setEmoji('🛡️').setStyle(ButtonStyle.Secondary)
+            )]
+        });
+    }
+    const result = await executeRpgSale(message, player, itemId, quantity);
+    await message.reply(result.message);
+}
+
+async function handleRpgRankupCommand(message) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const index = getRpgRankIndex(player.guildRank);
+    const nextRank = RPG_RANKS[index + 1];
+    if (!nextRank) return message.reply(`👑🏆 You already hold the highest guild rank: **Platinum**.\n\n${getRpgNpcLine('guildMaster', 'platinum', player)}`);
+    const required = RPG_RANK_REQUIREMENTS[nextRank];
+    if (player.guildReputation < required) {
+        return message.reply(`🏰 You need **${required} Guild Reputation** to reach ${getRpgRankEmoji(nextRank)} ${nextRank}. Current: **${player.guildReputation}**.\n\n${getRpgNpcLine('guildMaster', 'training', player)}`);
+    }
+    player.guildRank = nextRank;
+    player.gold += 500 * (index + 1);
+    player.statPoints += 5;
+    player.skillPoints += 2;
+    unlockRpgAchievement(player, `${nextRank} Adventurer`);
+    if (nextRank === 'Platinum') unlockRpgAchievement(player, 'Platinum Hero');
+    saveRpgStore();
+    await message.channel.send({ content: '🎺✨ **A guild-wide fanfare echoes through the hall!**', embeds: [new EmbedBuilder()
+        .setColor(RPG_RANK_COLORS[nextRank])
+        .setTitle(`🏰 ${getRpgRankEmoji(nextRank)} Guild Rank Promotion!`)
+        .setDescription(`The Guild Master raises the ceremonial seal.\n\n**${player.username} is now a ${nextRank}-rank adventurer!**\n\n${getRpgNpcLine('guildMaster', nextRank === 'Platinum' ? 'platinum' : 'rankUp', player, { rank: nextRank })}\n\n${getRpgNpcLine('receptionist', 'rankUp', player, { adventurer: player.username, rank: `${getRpgRankEmoji(nextRank)} ${nextRank}` })}\n\n${getRpgNpcLine('bard', 'achievement', player, { rank: nextRank })}`)
+        .addFields(
+            { name: '🎁 Promotion Rewards', value: `🟡 ${500 * (index + 1)} Gold\n📊 5 stat points\n✨ 2 skill points\n🔓 New ${nextRank} contracts`, inline: true },
+            { name: '📖 Guild Record', value: `🏅 Achievement: **${nextRank} Adventurer**\n${nextRank === 'Platinum' ? '👑 Title unlocked: **Platinum Hero**' : '⚔️ Stronger threats now await.'}`, inline: true }
+        )
+        .setFooter({ text: 'The Guild Master approved the promotion, and the Receptionist updated the guild ledger.' })
+        .setTimestamp()] });
+}
+
+function buildRpgMissionEmbed(player, type) {
+    const mission = ensureRpgMissions(player, type);
+    const labelMap = {
+        monstersDefeated: ['⚔️', 'Defeat monsters'], contractsCompleted: ['📜', 'Complete contracts'], partsSold: ['🦴', 'Sell monster parts'], dungeonClears: ['🏰', 'Clear dungeons'], itemsCrafted: ['🔨', 'Craft or upgrade items'],
+        bossesDefeated: ['👑', 'Defeat bosses'], reputationEarned: ['🏰', 'Earn Guild Reputation'], dragonsDefeated: ['🐉', 'Defeat dragon enemies']
+    };
+    const lines = Object.entries(mission.requirements).map(([key, required]) => {
+        const progress = Math.min(required, getRpgMissionProgress(player, mission, key));
+        const [emoji, label] = labelMap[key] || ['🎯', key];
+        return `${progress >= required ? '✅' : '⬜'} ${emoji} **${label}:** ${progress}/${required} \`${buildRpgProgressBar(progress, required, 8)}\``;
+    });
+    const complete = Object.entries(mission.requirements).every(([key, required]) => getRpgMissionProgress(player, mission, key) >= required);
+    return new EmbedBuilder()
+        .setColor(type === 'daily' ? '#3498DB' : '#8E44AD')
+        .setTitle(type === 'daily' ? '☀️📜 Daily Guild Missions' : '🌙📜 Weekly Guild Missions')
+        .setDescription(`${getRpgNpcLine('receptionist', 'missionBoard', player, { mission: type })}\n\n${lines.join('\n')}`.slice(0, 4096))
+        .addFields({ name: '🎁 Reward Bundle', value: `🟡 ${mission.rewards.gold} Gold · ✨ ${mission.rewards.exp} EXP · 🏰 ${mission.rewards.rep} Rep · 🎟️ ${mission.rewards.tokens} Guild Token(s)`, inline: false })
+        .setFooter({ text: mission.claimed ? '✅ Rewards already claimed.' : complete ? `🎁 Ready! Use !${type} claim` : 'Progress updates automatically as you play.' })
+        .setTimestamp();
+}
+
+async function handleRpgMissionCommand(message, type, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const mission = ensureRpgMissions(player, type);
+    if (String(args[0] || '').toLowerCase() === 'claim') {
+        if (mission.claimed) return message.reply(`Your ${type} rewards are already claimed.\n\n${getRpgNpcLine('receptionist', 'missionBoard', player, { mission: type })}`);
+        const complete = Object.entries(mission.requirements).every(([key, required]) => getRpgMissionProgress(player, mission, key) >= required);
+        if (!complete) return message.reply(`Complete every ${type} mission before claiming the bundle.\n\n${getRpgNpcLine('receptionist', 'missionBoard', player, { mission: type })}`);
+        mission.claimed = true;
+        player.gold += mission.rewards.gold;
+        player.guildReputation += mission.rewards.rep;
+        addRpgInventory(player, 'special_token', mission.rewards.tokens);
+        const lines = [];
+        addRpgExp(player, mission.rewards.exp, lines);
+        saveRpgStore();
+        return message.reply(`🎁 Claimed ${type} rewards: ${mission.rewards.gold} Gold, ${mission.rewards.exp} EXP, ${mission.rewards.rep} Reputation, and ${mission.rewards.tokens} Guild Token(s).\n\n${getRpgNpcLine('receptionist', 'missionClaimed', player, { mission: type })}\n\n${getRpgNpcLine('bard', 'achievement', player, { mission: type })}`);
+    }
+    saveRpgStore();
+    await message.channel.send({ embeds: [buildRpgMissionEmbed(player, type)] });
+}
+
+function getRpgDungeonByInput(input) {
+    const query = String(input || '').toLowerCase().trim();
+    if (!query) return null;
+    const numeric = Number.parseInt(query, 10);
+    const list = Object.entries(RPG_DUNGEONS);
+    if (Number.isFinite(numeric) && numeric >= 1 && numeric <= list.length) return { id: list[numeric - 1][0], ...list[numeric - 1][1] };
+    const found = list.find(([id, dungeon]) => id === query.replace(/\s+/g, '_') || dungeon.name.toLowerCase() === query);
+    return found ? { id: found[0], ...found[1] } : null;
+}
+
+
+async function handleRpgDungeonCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (!args.length) {
+        const available = Object.entries(RPG_DUNGEONS).filter(([, dungeon]) => canAccessRpgRank(player.guildRank, dungeon.rank));
+        const dungeonList = available.map(([id, dungeon], index) => `${getRpgDungeonEmoji(id)} **${index + 1}. ${dungeon.name}** · ${getRpgRankEmoji(dungeon.rank)} ${dungeon.rank}\n⭐ Recommended Lv.${dungeon.level} · 🎁 🟡 ${dungeon.reward.gold} / ✨ ${dungeon.reward.exp}\n\`!dungeon ${id} Normal\``).join('\n\n');
+        return message.channel.send({ embeds: [new EmbedBuilder()
+            .setColor('#34495E')
+            .setTitle('🏰🗺️ Guild Dungeon Registry')
+            .setDescription(`${getRpgNpcLine('scout', 'dungeonEntry', player)}\n\n${getRpgNpcLine('guildMaster', 'dungeonWarning', player)}\n\n${dungeonList}`.slice(0, 4096))
+            .addFields({ name: '⚔️ Difficulties', value: Object.keys(RPG_DUNGEON_DIFFICULTIES).map(name => `${getRpgDifficultyEmoji(name)} ${name}`).join(' · '), inline: false })
+            .setFooter({ text: 'Five rooms: enemies, a random event, mini-boss, final boss, and reward chest.' })
+            .setTimestamp()] });
+    }
+    if (getRpgBattleOwner(message.guild.id, message.author.id)) return message.reply('⚔️ Finish your current battle first.');
+    const party = getRpgParty(player);
+    if (party && party.leaderId !== player.userId) return message.reply('👑 Only the party leader can enter a shared dungeon.');
+    const dungeon = getRpgDungeonByInput(args[0]);
+    const difficultyName = Object.keys(RPG_DUNGEON_DIFFICULTIES).find(name => name.toLowerCase() === String(args[1] || 'Normal').toLowerCase()) || 'Normal';
+    const difficultyData = RPG_DUNGEON_DIFFICULTIES[difficultyName];
+    if (!dungeon || !canAccessRpgRank(player.guildRank, dungeon.rank)) return message.reply(`🔒 That dungeon is not available at your rank.\n\n${getRpgNpcLine('guildMaster', 'dungeonWarning', player)}`);
+    if (player.level + 5 < dungeon.level) return message.reply(`⚠️ Reach at least **Level ${dungeon.level - 5}** before entering ${getRpgDungeonEmoji(dungeon.id)} **${dungeon.name}**.\n\n${getRpgNpcLine('guildMaster', 'training', player)}`);
+    const remaining = checkRpgCooldown(player, 'dungeon', RPG_DUNGEON_COOLDOWN_MS);
+    if (remaining) return message.reply(`⏳ Dungeon entry is available in **${formatRpgDuration(remaining)}**.`);
+    const rankScale = 1 + getRpgRankIndex(dungeon.rank) * 0.08;
+    createRpgBattle(player, dungeon.enemies[0], { type: 'dungeon', dungeonId: dungeon.id, dungeonRoom: 0, difficulty: difficultyName, difficultyMultiplier: rankScale * difficultyData.enemy });
+    player.activeBattle.log.push(`${getRpgDungeonEmoji(dungeon.id)} ${getRpgDifficultyEmoji(difficultyName)} The party enters **${difficultyName} ${dungeon.name}**.`);
+    player.activeBattle.log.push(getRpgNpcLine('scout', 'dungeonEntry', player, { dungeon: dungeon.name }));
+    player.activeBattle.log.push(getRpgNpcLine('guildMaster', 'dungeonWarning', player, { dungeon: dungeon.name }));
+    saveRpgStore();
+    await sendRpgBattleMessage(message, player);
+}
+
+function getRpgBossesForPlayer(player) {
+    return Object.entries(RPG_ENEMIES).filter(([, enemy]) => enemy.boss && canAccessRpgRank(player.guildRank, enemy.rank));
+}
+
+
+async function handleRpgBossCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    if (!args.length) {
+        const bosses = getRpgBossesForPlayer(player);
+        const bossList = bosses.map(([id, boss], index) => `${getRpgEnemyEmoji(id)} **${index + 1}. ${boss.name}** · ${getRpgRankEmoji(boss.rank)} ${boss.rank}\n❤️ ${boss.hp} HP · 💥 ${boss.damage} Damage · 🎁 ${boss.drops.map(([drop]) => `${getRpgItemEmoji(drop, RPG_ITEMS[drop])} ${RPG_ITEMS[drop]?.name}`).join(', ')}\n\`!boss ${id}\``).join('\n\n');
+        return message.channel.send({ embeds: [new EmbedBuilder()
+            .setColor('#922B21')
+            .setTitle('👑🔥 Guild Boss Contract Registry')
+            .setDescription(`${getRpgNpcLine('guildMaster', 'bossWarning', player)}\n\n${getRpgNpcLine('scout', 'bossLocated', player, { enemy: 'the listed targets', location: 'their marked territories' })}\n\n${bossList}`.slice(0, 4096))
+            .setFooter({ text: 'Bosses have phase changes, stronger attacks, status effects, and rare drops.' })
+            .setTimestamp()] });
+    }
+    if (getRpgBattleOwner(message.guild.id, message.author.id)) return message.reply('⚔️ Finish your current battle first.');
+    const party = getRpgParty(player);
+    if (party && party.leaderId !== player.userId) return message.reply('👑 Only the party leader can begin a shared boss fight.');
+    const query = args.join(' ').toLowerCase().trim();
+    const bosses = getRpgBossesForPlayer(player);
+    const numeric = Number.parseInt(query, 10);
+    const entry = Number.isFinite(numeric) ? bosses[numeric - 1] : bosses.find(([id, boss]) => id === query.replace(/\s+/g, '_') || boss.name.toLowerCase() === query);
+    if (!entry) return message.reply(`🔒 That boss is unavailable at your current rank.\n\n${getRpgNpcLine('guildMaster', 'bossWarning', player)}`);
+    const remaining = checkRpgCooldown(player, 'boss', RPG_BOSS_COOLDOWN_MS);
+    if (remaining) return message.reply(`⏳ Boss contracts are available in **${formatRpgDuration(remaining)}**.`);
+    createRpgBattle(player, entry[0], { type: entry[1].dragon ? 'dragon' : 'boss' });
+    player.activeBattle.log.push(`🚨 ${getRpgEnemyEmoji(entry[0])} **BOSS CONTRACT ENGAGED!**`);
+    player.activeBattle.log.push(getRpgNpcLine('scout', 'bossLocated', player, { enemy: entry[1].name, location: player.activeContract?.location || 'the marked territory' }));
+    player.activeBattle.log.push(getRpgNpcLine('guildMaster', 'bossWarning', player, { enemy: entry[1].name }));
+    saveRpgStore();
+    await sendRpgBattleMessage(message, player);
+}
+
+async function handleRpgLeaderboardCommand(message, args) {
+    const category = String(args[0] || 'level').toLowerCase();
+    const categories = {
+        level: ['level', '⭐ Highest Level', '⭐'], reputation: ['guildReputation', '🏰 Guild Reputation', '🏰'], contracts: ['counters.contractsCompleted', '📜 Contracts Completed', '📜'],
+        bosses: ['counters.bossesDefeated', '👑 Bosses Defeated', '👑'], dragons: ['counters.dragonsDefeated', '🐉 Dragons Defeated', '🐉'], gold: ['gold', '🟡 Richest Adventurers', '🟡'], dungeons: ['counters.dungeonClears', '🏰 Dungeon Clears', '🏰']
+    };
+    const selected = categories[category] || categories.level;
+    const getValue = player => selected[0].split('.').reduce((value, key) => value?.[key], player) || 0;
+    const players = Object.values(rpgStore.players).filter(player => player.guildId === message.guild.id).sort((a, b) => getValue(b) - getValue(a)).slice(0, 10);
+    const viewer = getRpgPlayer(message.guild.id, message.author.id);
+    const medals = ['🥇', '🥈', '🥉'];
+    const rankingText = players.map((player, index) => `${medals[index] || `**${index + 1}.**`} ${RPG_CLASS_DATA[player.className]?.emoji || '🧙'} <@${player.userId}> · ${getRpgRankEmoji(player.guildRank)} ${player.guildRank}\n└ ${selected[2]} **${getValue(player)}**`).join('\n\n') || '📭 No adventurers have joined yet.';
+    await message.channel.send({ embeds: [new EmbedBuilder()
+        .setColor('#F1C40F')
+        .setTitle(`🏆 ${selected[1]} Leaderboard`)
+        .setDescription(`${getRpgNpcLine('bard', 'leaderboard', viewer, { guildId: message.guild.id, userId: message.author.id, adventurer: message.author.username })}\n\n${rankingText}`.slice(0, 4096))
+        .setFooter({ text: 'Categories: level · reputation · contracts · bosses · dragons · gold · dungeons' })
+        .setTimestamp()] });
+}
+
+async function handleRpgPartyCommand(message, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const action = String(args[0] || '').toLowerCase();
+    let party = getRpgParty(player);
+    if (!action || action === 'status') {
+        if (!party) return message.reply(`🧭 You are not in a party. Use \`!party invite @user\` to create one.\n\n${getRpgNpcLine('bard', 'party', player)}`);
+        cleanRpgParty(party);
+        saveRpgStore();
+        const partyList = party.members.map(id => {
+            const member = getRpgPlayer(message.guild.id, id);
+            return `${id === party.leaderId ? '👑' : RPG_CLASS_DATA[member?.className]?.emoji || '⚔️'} <@${id}> · ${member ? `${getRpgRankEmoji(member.guildRank)} ${member.guildRank} · ⭐ Lv.${member.level}` : 'Unknown'}`;
+        }).join('\n');
+        return message.channel.send({ embeds: [new EmbedBuilder()
+            .setColor('#16A085')
+            .setTitle('🤝⚔️ Adventurer Party')
+            .setDescription(`${getRpgNpcLine('guildMaster', 'party', player)}\n\n${getRpgNpcLine('bard', 'party', player)}\n\n${partyList}`.slice(0, 4096))
+            .addFields({ name: '🎯 Party Benefits', value: 'Shared boss and dungeon progress · Split EXP · Individual loot drops', inline: false })
+            .setFooter({ text: `${party.members.length}/${RPG_MAX_PARTY_SIZE} members · Only the leader starts shared encounters.` })
+            .setTimestamp()] });
+    }
+    if (action === 'invite') {
+        const target = message.mentions.users.first();
+        if (!target || target.bot || target.id === message.author.id) return message.reply('🤝 Mention another adventurer: `!party invite @user`.');
+        const targetPlayer = getRpgPlayer(message.guild.id, target.id);
+        if (!targetPlayer) return message.reply('🏰 That member must use `!start` first.');
+        if (targetPlayer.partyId) return message.reply('🤝 That adventurer is already in a party.');
+        if (!party) party = createRpgParty(message.guild.id, message.author.id);
+        if (party.leaderId !== message.author.id) return message.reply('👑 Only the party leader can invite members.');
+        if (party.members.length >= RPG_MAX_PARTY_SIZE) return message.reply('🚫 Your party is full.');
+        const token = crypto.randomBytes(5).toString('hex');
+        rpgPartyInvites.set(target.id, { token, guildId: message.guild.id, partyId: party.id, inviterId: message.author.id, expiresAt: Date.now() + 120000 });
+        return message.channel.send({ content: `📨 ${target}, ${RPG_CLASS_DATA[player.className]?.emoji || '⚔️'} **${message.author.username}** invited you to an adventurer party!\n\n${getRpgNpcLine('receptionist', 'party', player)}`, components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`rpg_party:${token}:yes`).setLabel('Join Party').setEmoji('🤝').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`rpg_party:${token}:no`).setLabel('Decline').setEmoji('✖️').setStyle(ButtonStyle.Secondary)
+        )] });
+    }
+    if (action === 'accept') {
+        const invite = rpgPartyInvites.get(message.author.id);
+        if (!invite || invite.expiresAt < Date.now()) return message.reply('⌛ You have no active party invitation.');
+        const targetParty = rpgStore.parties[invite.partyId];
+        if (!targetParty || targetParty.members.length >= RPG_MAX_PARTY_SIZE) return message.reply('🚫 That party is no longer available.');
+        targetParty.members.push(message.author.id);
+        player.partyId = targetParty.id;
+        rpgPartyInvites.delete(message.author.id);
+        saveRpgStore();
+        return message.reply(`🤝✨ You joined the adventurer party!\n\n${getRpgNpcLine('guildMaster', 'party', player)}`);
+    }
+    if (action === 'leave') {
+        if (!party) return message.reply('🤝 You are not in a party.');
+        party.members = party.members.filter(id => id !== message.author.id);
+        player.partyId = null;
+        if (party.leaderId === message.author.id) party.leaderId = party.members[0] || null;
+        cleanRpgParty(party);
+        saveRpgStore();
+        return message.reply(`🚪 You left the adventurer party.\n\n${getRpgNpcLine('bard', 'party', player)}`);
+    }
+    if (action === 'kick') {
+        if (!party || party.leaderId !== message.author.id) return message.reply('👑 Only the party leader can remove members.');
+        const target = message.mentions.users.first();
+        if (!target || target.id === message.author.id || !party.members.includes(target.id)) return message.reply('🎯 Mention a party member to remove.');
+        party.members = party.members.filter(id => id !== target.id);
+        const targetPlayer = getRpgPlayer(message.guild.id, target.id);
+        if (targetPlayer) targetPlayer.partyId = null;
+        saveRpgStore();
+        return message.reply(`🚪 Removed **${target.username}** from the party.\n\n${getRpgNpcLine('guildMaster', 'party', player)}`);
+    }
+    await message.reply('🤝 Party commands: `!party` · `!party invite @user` · `!party accept` · `!party leave` · `!party kick @user`.');
+}
+
+async function handleRpgAchievementsCommand(message, showTitles = false) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    if (!player) return message.reply('🏰 Use `!start` first.');
+    const values = showTitles ? player.titles : player.achievements;
+    const achievementEmoji = value => /Dragon/.test(value) ? '🐉' : /Dungeon/.test(value) ? '🏰' : /Mage|Arcane/.test(value) ? '🔮' : /Swordsman|Blade/.test(value) ? '⚔️' : /Platinum/.test(value) ? '👑' : /Gold/.test(value) ? '🥇' : /Silver/.test(value) ? '🥈' : /Bronze|First/.test(value) ? '🥉' : '🏆';
+    const list = values.length ? values.map(value => `${value === player.equippedTitle ? '👑' : achievementEmoji(value)} **${value}**${value === player.equippedTitle ? ' · Equipped' : ''}`).join('\n') : '🔒 No entries unlocked yet.';
+    await message.channel.send({ embeds: [new EmbedBuilder()
+        .setColor(showTitles ? '#D4AC0D' : '#7D3C98')
+        .setTitle(showTitles ? '🏅✨ Adventurer Titles' : '🏆✨ Adventurer Achievements')
+        .setDescription(`${getRpgNpcLine('bard', showTitles ? 'titleEquip' : 'achievement', player)}\n\n${list}`.slice(0, 4096))
+        .setFooter({ text: showTitles ? 'Equip one with !profile title title-name' : 'Achievements and titles unlock automatically as your legend grows.' })
+        .setTimestamp()] });
+}
+
+async function handleRpgInteraction(interaction) {
+    const customId = interaction.customId;
+    if (interaction.isStringSelectMenu() && customId.startsWith('rpg_npc:')) {
+        const [, guildId, userId] = customId.split(':');
+        if (interaction.user.id !== userId || interaction.guildId !== guildId) {
+            return interaction.reply({ content: '🔒 This Guild staff conversation belongs to another adventurer.', ephemeral: true });
+        }
+        const player = getRpgPlayer(guildId, userId);
+        const npcId = interaction.values[0];
+        if (!player || !RPG_NPC_PROFILES[npcId]) {
+            return interaction.reply({ content: '💬 That Guild staff member is unavailable.', ephemeral: true });
+        }
+        touchRpgPlayer(player, `spoke with ${RPG_NPC_PROFILES[npcId].name}`);
+        saveRpgStore();
+        return interaction.update({
+            embeds: [buildRpgNpcConversationEmbed(player, npcId)],
+            components: [buildRpgNpcSelectRow(player), buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)]
+        });
+    }
+    if (interaction.isStringSelectMenu() && customId.startsWith('rpg_class:')) {
+        const [, guildId, userId] = customId.split(':');
+        if (interaction.user.id !== userId || interaction.guildId !== guildId) return interaction.reply({ content: 'This class selection belongs to another adventurer.', ephemeral: true });
+        if (getRpgPlayer(guildId, userId)) return interaction.reply({ content: 'Your adventurer profile already exists.', ephemeral: true });
+        const className = interaction.values[0];
+        if (!RPG_CLASS_DATA[className]) return interaction.reply({ content: 'Invalid class selection.', ephemeral: true });
+        const player = createRpgPlayer(guildId, interaction.user, className);
+        return interaction.update({ content: `🎺✨ Welcome to the Adventurer Guild, **${interaction.user.username}**! Your legend begins now.\n\n${getRpgNpcLine('receptionist', 'classRegistered', player, { className })}\n\n${getRpgNpcLine('quartermaster', 'greeting', player)}`, embeds: [buildRpgProfileEmbed(player, interaction.user)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+    }
+    if (interaction.isStringSelectMenu() && customId.startsWith('rpg_contract:')) {
+        const [, guildId, userId] = customId.split(':');
+        if (interaction.user.id !== userId || interaction.guildId !== guildId) {
+            return interaction.reply({ content: 'This contract board belongs to another adventurer.', ephemeral: true });
+        }
+        const player = getRpgPlayer(guildId, userId);
+        const contract = (RPG_CONTRACTS[player?.guildRank] || []).find(entry => entry.id === interaction.values[0]);
+        if (!player || !contract) return interaction.reply({ content: 'The contract is no longer available.', ephemeral: true });
+        const result = acceptRpgContract(player, contract);
+        if (!result.ok) {
+            return interaction.reply({
+                content: `${result.message}
+
+${getRpgNpcLine('receptionist', 'contractDenied', player, { reason: result.message })}`,
+                ephemeral: true
+            });
+        }
+        return interaction.update({
+            embeds: [new EmbedBuilder()
+                .setColor(RPG_RANK_COLORS[player.guildRank])
+                .setTitle(`${getRpgContractEmoji(contract.type)}✨ Contract Accepted!`)
+                .setDescription(`📜 **${contract.name}**
+📍 ${contract.location}
+🎯 Objective: ${contract.amount}
+🎁 🟡 ${contract.gold} · ✨ ${contract.exp} EXP · 🏰 ${contract.rep} Rep
+
+${getRpgNpcLine('receptionist', 'contractAccepted', player, { contract: contract.name })}\n\n${getRpgNpcLine('scout', 'targetLocated', player, { contract: contract.name, location: contract.location })}`)
+                .setTimestamp()],
+            components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)]
+        });
+    }
+    if (!interaction.isButton()) return false;
+    if (customId.startsWith('rpg_menu:')) {
+        const [, guildId, userId, action] = customId.split(':');
+        if (interaction.user.id !== userId || interaction.guildId !== guildId) return interaction.reply({ content: '🔒 This Guild Hall menu belongs to another adventurer.', ephemeral: true });
+        const player = getRpgPlayer(guildId, userId);
+        if (!player) return interaction.reply({ content: '🏰 RPG profile not found. Use !start.', ephemeral: true });
+        if (action === 'contracts') {
+            const components = [];
+            if (!player.activeContract) components.push(buildRpgContractSelectRow(player));
+            components.push(buildRpgGuildNavigationRow(player));
+            return interaction.update({ embeds: [buildRpgContractsEmbed(player)], components });
+        }
+        if (action === 'inventory') return interaction.update({ embeds: [buildRpgInventoryEmbed(player, 0)], components: [buildRpgInventoryRow(player, 0), buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+        if (action === 'shop') return interaction.update({ embeds: [buildRpgShopEmbed(player)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+        if (action === 'blacksmith') return interaction.update({ embeds: [buildRpgBlacksmithEmbed(player)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+        if (action === 'profile') return interaction.update({ embeds: [buildRpgProfileEmbed(player, interaction.user)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+        return interaction.update({ embeds: [buildRpgGuildEmbed(player)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+    }
+    if (customId.startsWith('rpg_quick:')) {
+        const [, guildId, userId, action] = customId.split(':');
+        if (interaction.user.id !== userId || interaction.guildId !== guildId) return interaction.reply({ content: '🔒 These quick actions belong to another adventurer.', ephemeral: true });
+        const player = getRpgPlayer(guildId, userId);
+        if (!player) return interaction.reply({ content: '🏰 RPG profile not found. Use !start.', ephemeral: true });
+        touchRpgPlayer(player, `used the ${action} quick action`);
+        if (action === 'refresh') {
+            saveRpgStore();
+            return interaction.update({ embeds: [buildRpgGuildEmbed(player)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+        }
+        if (action === 'daily' || action === 'weekly') {
+            saveRpgStore();
+            return interaction.update({ embeds: [buildRpgMissionEmbed(player, action)], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+        }
+        if (action === 'party') {
+            const party = getRpgParty(player);
+            const description = party
+                ? party.members.map(id => {
+                    const member = getRpgPlayer(guildId, id);
+                    return `${id === party.leaderId ? '👑' : RPG_CLASS_DATA[member?.className]?.emoji || '⚔️'} <@${id}> · ${member ? `${getRpgRankEmoji(member.guildRank)} ${member.guildRank} · ⭐ Lv.${member.level}` : 'Unknown'}`;
+                }).join('\n')
+                : '🧭 You are adventuring solo. Use `!party invite @user` to form a party of up to four players.';
+            saveRpgStore();
+            return interaction.update({ embeds: [new EmbedBuilder().setColor('#16A085').setTitle('🤝⚔️ Party Camp').setDescription(`${getRpgNpcLine('bard', 'party', player)}\n\n${description}`.slice(0, 4096)).setFooter({ text: party ? `${party.members.length}/${RPG_MAX_PARTY_SIZE} members` : 'Parties share encounters, EXP, and individual loot.' }).setTimestamp()], components: [buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+        }
+        if (action === 'hunt') {
+            if (getRpgBattleOwner(guildId, userId)) return interaction.reply({ content: '⚔️ You are already in battle. Use `!battle` or return to the active battle message.', ephemeral: true });
+            if (!player.activeContract) return interaction.reply({ content: '📜 Accept a Hunt or Gathering contract first.', ephemeral: true });
+            if (!['Hunt', 'Gathering'].includes(player.activeContract.type)) return interaction.reply({ content: `🧭 This is a ${player.activeContract.type} contract. Use the matching boss or dungeon command.`, ephemeral: true });
+            const party = getRpgParty(player);
+            if (party && party.leaderId !== player.userId) return interaction.reply({ content: '👑 Only the party leader can start a shared hunt.', ephemeral: true });
+            const remaining = checkRpgCooldown(player, 'hunt', RPG_HUNT_COOLDOWN_MS);
+            if (remaining) return interaction.reply({ content: `⏳ Hunt ready in **${formatRpgDuration(remaining)}**.`, ephemeral: true });
+            const battle = createRpgBattle(player, player.activeContract.target, { type: 'hunt' });
+            battle.log.push(`📜 Contract progress: ${player.activeContract.progress || 0}/${player.activeContract.amount}`);
+            saveRpgStore();
+            return interaction.update({ embeds: [buildRpgBattleEmbed(player)], components: buildRpgBattleRows(player) });
+        }
+    }
+    if (customId.startsWith('rpg_battle:')) {
+        const [, battleId, action] = customId.split(':');
+        const ownerPlayer = getRpgBattleOwner(interaction.guildId, interaction.user.id);
+        if (!ownerPlayer?.activeBattle || ownerPlayer.activeBattle.id !== battleId) return interaction.reply({ content: 'That battle has ended or you are not a participant.', ephemeral: true });
+        const actor = getRpgPlayer(interaction.guildId, interaction.user.id);
+        const result = resolveRpgBattleRound(ownerPlayer, actor, action);
+        if (!result.ok) return interaction.reply({ content: result.message, ephemeral: true });
+        if (result.victory && !ownerPlayer.activeBattle) {
+            return interaction.update({ embeds: [new EmbedBuilder().setColor('#F1C40F').setTitle('🏆✨ Victory!').setDescription((result.rewardLog || ['Victory!']).join('\n').slice(0, 4096))], components: [] });
+        }
+        if (result.defeat || result.fled || !ownerPlayer.activeBattle) {
+            return interaction.update({ content: result.defeat ? `💀🏥 The party was defeated and carried back to the Guild.\n\n${getRpgNpcLine('guildMaster', 'defeat', actor)}\n\n${getRpgNpcLine('receptionist', 'recovery', actor)}` : `🏃💨 The encounter has ended.\n\n${getRpgNpcLine('scout', 'return', actor)}`, embeds: [], components: [] });
+        }
+        return interaction.update({ embeds: [buildRpgBattleEmbed(ownerPlayer)], components: buildRpgBattleRows(ownerPlayer) });
+    }
+    if (customId.startsWith('rpg_inv:')) {
+        const [, guildId, userId, page] = customId.split(':');
+        if (interaction.user.id !== userId || interaction.guildId !== guildId) return interaction.reply({ content: 'This inventory belongs to another adventurer.', ephemeral: true });
+        const player = getRpgPlayer(guildId, userId);
+        if (!player) return interaction.reply({ content: 'RPG profile not found.', ephemeral: true });
+        return interaction.update({ embeds: [buildRpgInventoryEmbed(player, page)], components: [buildRpgInventoryRow(player, page), buildRpgGuildNavigationRow(player), buildRpgGuildQuickRow(player)] });
+    }
+    if (customId.startsWith('rpg_sale:')) {
+        const [, token, answer] = customId.split(':');
+        const sale = rpgPendingSales.get(token);
+        if (!sale || sale.expiresAt < Date.now() || sale.userId !== interaction.user.id || sale.guildId !== interaction.guildId) {
+            return interaction.reply({ content: 'That sale confirmation expired.', ephemeral: true });
+        }
+        rpgPendingSales.delete(token);
+        const player = getRpgPlayer(sale.guildId, sale.userId);
+        if (answer !== 'yes') {
+            return interaction.update({
+                content: `🛑 Sale cancelled. Your materials are safe.
+
+${getRpgNpcLine('receptionist', 'saleCancelled', player)}`,
+                components: []
+            });
+        }
+        const result = await executeRpgSale(interaction, player, sale.itemId, sale.quantity);
+        return interaction.update({ content: result.message, components: [] });
+    }
+    if (customId.startsWith('rpg_party:')) {
+        const [, token, answer] = customId.split(':');
+        const invite = rpgPartyInvites.get(interaction.user.id);
+        if (!invite || invite.token !== token || invite.expiresAt < Date.now()) return interaction.reply({ content: 'That party invitation expired.', ephemeral: true });
+        rpgPartyInvites.delete(interaction.user.id);
+        if (answer !== 'yes') return interaction.update({ content: '✖️ Party invitation declined.', components: [] });
+        const party = rpgStore.parties[invite.partyId];
+        const player = getRpgPlayer(invite.guildId, interaction.user.id);
+        if (!party || !player || party.members.length >= RPG_MAX_PARTY_SIZE || player.partyId) return interaction.reply({ content: 'The party is no longer available.', ephemeral: true });
+        party.members.push(interaction.user.id);
+        player.partyId = party.id;
+        saveRpgStore();
+        return interaction.update({ content: `🤝 **${interaction.user.username}** joined the adventurer party.\n\n${getRpgNpcLine('guildMaster', 'party', player)}`, components: [] });
+    }
+    return false;
+}
+
+const RPG_UNIQUE_COMMANDS = new Set([
+    '!start', '!class', '!stats', '!skills', '!guild', '!guildstaff', '!contracts', '!accept', '!abandon', '!hunt', '!battle',
+    '!inventory', '!equipment', '!shop', '!blacksmith', '!rankup', '!weekly', '!dungeon', '!boss', '!party', '!achievements', '!titles'
+]);
+const RPG_OVERLAPPING_COMMANDS = new Set(['!profile', '!daily', '!sell', '!leaderboard']);
+
+async function routeRpgCommand(message, command, args) {
+    const player = getRpgPlayer(message.guild.id, message.author.id);
+    const explicitRpg = String(args[0] || '').toLowerCase() === 'rpg';
+    if (!RPG_UNIQUE_COMMANDS.has(command) && !(RPG_OVERLAPPING_COMMANDS.has(command) && (player || explicitRpg))) return false;
+    if (explicitRpg) args = args.slice(1);
+    if (player) { touchRpgPlayer(player, command.slice(1)); saveRpgStore(); }
+    switch (command) {
+        case '!start': await handleRpgStartCommand(message); break;
+        case '!profile': await handleRpgProfileCommand(message, args); break;
+        case '!class': await handleRpgClassCommand(message); break;
+        case '!stats': await handleRpgStatsCommand(message, args); break;
+        case '!skills': await handleRpgSkillsCommand(message, args); break;
+        case '!guild': await handleRpgGuildCommand(message); break;
+        case '!guildstaff': await handleRpgGuildStaffCommand(message, args); break;
+        case '!contracts': await handleRpgContractsCommand(message); break;
+        case '!accept': await handleRpgAcceptCommand(message, args); break;
+        case '!abandon': await handleRpgAbandonCommand(message); break;
+        case '!hunt': await handleRpgHuntCommand(message); break;
+        case '!battle': await handleRpgBattleCommand(message, args); break;
+        case '!inventory': await handleRpgInventoryCommand(message, args); break;
+        case '!equipment': await handleRpgEquipmentCommand(message, args); break;
+        case '!shop': await handleRpgShopCommand(message, args); break;
+        case '!blacksmith': await handleRpgBlacksmithCommand(message, args); break;
+        case '!sell': await handleRpgSellCommand(message, args); break;
+        case '!rankup': await handleRpgRankupCommand(message); break;
+        case '!daily': await handleRpgMissionCommand(message, 'daily', args); break;
+        case '!weekly': await handleRpgMissionCommand(message, 'weekly', args); break;
+        case '!dungeon': await handleRpgDungeonCommand(message, args); break;
+        case '!boss': await handleRpgBossCommand(message, args); break;
+        case '!leaderboard': await handleRpgLeaderboardCommand(message, args); break;
+        case '!party': await handleRpgPartyCommand(message, args); break;
+        case '!achievements': await handleRpgAchievementsCommand(message, false); break;
+        case '!titles': await handleRpgAchievementsCommand(message, true); break;
+        default: return false;
+    }
+    return true;
+}
+
+
+// ==========================================
 // PAGINATED HELP DIRECTORY
 // ==========================================
+
+function buildRpgHelpEmbed() {
+
+    return new EmbedBuilder()
+        .setColor('#9B7A3C')
+        .setTitle('📜✨ Adventurer Guild RPG Command List')
+        .setDescription('🔔 Welcome, adventurer. Every command below opens another path through the Guild.')
+        .addFields(
+            {
+                name: '🧭 Start & Character',
+                value: [
+                    '`!start` — Create your profile and choose Swordsman or Mage.',
+                    '`!profile` — View your level, resources, rank, gear, and contract.',
+                    '`!profile title name` — Equip an unlocked title.',
+                    '`!class` — View your class paths and unlocked abilities.',
+                    '`!stats [stat] [amount]` — View or spend stat points.',
+                    '`!skills [unlock] [name/number]` — View or unlock class skills.',
+                    '`!achievements` / `!titles` — View earned achievements and titles.'
+                ].join('\n'),
+                inline: false
+            },
+            {
+                name: '🏛️ Guild & Contracts',
+                value: [
+                    '`!guild` — Open the Adventurer Guild hall.',
+                    '`!guildstaff [npc]` — Meet and talk with the Guild NPC cast.',
+                    '`!contracts` — View rank-appropriate contracts and selection menu.',
+                    '`!accept number` — Accept one main contract.',
+                    '`!abandon` — Abandon your active contract.',
+                    '`!rankup` — Request promotion when reputation is high enough.'
+                ].join('\n'),
+                inline: false
+            },
+            {
+                name: '⚔️ Combat & Challenges',
+                value: [
+                    '`!hunt` — Hunt a monster for your active contract.',
+                    '`!battle [attack/skill/defend/potion/flee]` — Resume or act in battle.',
+                    '`!boss [boss]` — View or start multi-phase boss fights.',
+                    '`!dungeon [dungeon] [difficulty]` — Enter a five-room dungeon.',
+                    '`!party ...` — Create a party of up to four adventurers.'
+                ].join('\n'),
+                inline: false
+            },
+            {
+                name: '🎒 Inventory, Shop & Crafting',
+                value: [
+                    '`!inventory [page]` / `!inventory use item` — Browse or use stored supplies.',
+                    '`!equipment [equip item]` — View or equip owned gear.',
+                    '`!shop [buy item quantity]` — Buy potions and combat supplies.',
+                    '`!blacksmith [craft/upgrade/repair]` — Craft and improve equipment.',
+                    '`!sell item quantity` / `!sell allcommon` — Sell monster parts.'
+                ].join('\n'),
+                inline: false
+            },
+            {
+                name: '✨ Missions & Competition',
+                value: [
+                    '`!daily [claim]` — View or claim daily mission rewards.',
+                    '`!weekly [claim]` — View or claim weekly mission rewards.',
+                    '`!leaderboard [category]` — Compare level, reputation, wealth, bosses, dragons, contracts, or dungeon clears.'
+                ].join('\n'),
+                inline: false
+            },
+            {
+                name: '📖 Help',
+                value: [
+                    '`!help` — Open the complete bot command directory.',
+                    '`!helprpg` — Show this RPG command list.',
+                    '`!howrpg` — Open the beginner gameplay guide.',
+                ].join('\n'),
+                inline: false
+            }
+        )
+        .setFooter({
+            text: 'Adventurer Guild Archives • Start with !start, then accept a Bronze contract.'
+        });
+
+}
+
+async function sendRpgHelp(message) {
+
+    await message.channel.send({
+        embeds: [buildRpgHelpEmbed()],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
+
+function buildHowRpgEmbed() {
+
+    return new EmbedBuilder()
+        .setColor('#6F4E9C')
+        .setTitle('🏰✨ How to Play the Adventurer Guild RPG')
+        .setDescription('🔔 Welcome, new adventurer. Follow this glowing quest path to learn the main gameplay loop one step at a time.')
+        .addFields(
+            {
+                name: '1️⃣ Start Your Adventure',
+                value: 'Use `!start` to create your adventurer profile and choose your class.',
+                inline: false
+            },
+            {
+                name: '2️⃣ Choose Your Class',
+                value: [
+                    '**Swordsman:** melee weapons, stamina, blocking, dodging, and weapon skill trees.',
+                    '**Mage:** mana, spells, elemental magic, healing, shields, and ranged attacks.'
+                ].join('\n'),
+                inline: false
+            },
+            {
+                name: '3️⃣ Visit the Guild',
+                value: 'Use `!guild` to open the Adventurer Guild menu. Use `!contracts` to view contracts available for your current guild rank.',
+                inline: false
+            },
+            {
+                name: '4️⃣ Accept a Contract',
+                value: 'Use `!accept` to accept a contract. You can only have one main contract active at a time.',
+                inline: false
+            },
+            {
+                name: '5️⃣ Hunt Monsters',
+                value: 'Use `!hunt` to fight monsters related to your contract. Battles use embeds and buttons for **Basic Attack**, **Skill**, **Defend**, **Use Potion**, and **Flee**.',
+                inline: false
+            },
+            {
+                name: '6️⃣ Collect Rewards',
+                value: 'Defeating monsters gives **EXP**, **Gold**, and monster parts. Sell parts with `!sell` or save them for crafting at the blacksmith.',
+                inline: false
+            },
+            {
+                name: '7️⃣ Level Up',
+                value: 'Gain EXP to level up and earn stat points and skill points. Use `!stats` to improve your character and `!skills` to unlock new abilities.',
+                inline: false
+            },
+            {
+                name: '8️⃣ Upgrade Gear',
+                value: 'Use `!blacksmith` to craft and upgrade weapons and armor. Stronger gear prepares you for harder monsters, bosses, dungeons, and dragons.',
+                inline: false
+            },
+            {
+                name: '9️⃣ Rank Up',
+                value: 'Complete contracts to earn Guild Reputation. Use `!rankup` when you have enough reputation to advance through **Bronze → Silver → Gold → Emerald → Diamond → Platinum**.',
+                inline: false
+            },
+            {
+                name: '🔟 Take on Bigger Challenges',
+                value: 'As you grow stronger, unlock dungeons, bosses, dragon hunts, daily missions, weekly missions, titles, achievements, and leaderboards.',
+                inline: false
+            },
+            {
+                name: '🗺️ Main Gameplay Loop',
+                value: '**Start → Choose Class → Accept Contract → Hunt Monsters → Get Loot → Level Up → Craft Gear → Rank Up → Fight Bosses and Dragons**',
+                inline: false
+            },
+            {
+                name: '💡 Beginner Tips',
+                value: [
+                    '• Start with Bronze contracts.',
+                    '• Buy potions before difficult fights.',
+                    '• Do not sell rare monster parts unless you are sure you do not need them.',
+                    '• Upgrade your weapon often.',
+                    '• Spend stat points based on your class.',
+                    '• Swordsmen should focus on Strength, Defense, Health, Agility, and Stamina.',
+                    '• Mages should focus on Intelligence, Mana, Health, and Defense.',
+                    '• Use `!helprpg` anytime you forget the commands.'
+                ].join('\n'),
+                inline: false
+            }
+        )
+        .setFooter({
+            text: 'Every legendary hero began with a Bronze contract.'
+        });
+
+}
+
+async function sendHowRpgGuide(message) {
+
+    await message.channel.send({
+        embeds: [buildHowRpgEmbed()],
+        allowedMentions: {
+            parse: []
+        }
+    });
+
+}
 
 const HELP_CATEGORIES = [
     {
@@ -16401,6 +20346,39 @@ const HELP_CATEGORIES = [
             '`!rank [@user/userID]` — Show XP and level information.',
             '`!toplevels` / `!levelboard` / `!levels [page]` — Show the paginated XP leaderboard.',
             '`!synclevels` / `!levelsync` / `!backfilllevels [max-per-channel]` — Backfill XP from message history.'
+        ]
+    },
+    {
+        title: 'Adventurer Guild RPG',
+        emoji: '⚔️',
+        description: 'Complete fantasy RPG gameplay with persistent profiles, contracts, combat, loot, crafting, rank progression, missions, dungeons, bosses, and parties.',
+        commands: [
+            '`!start` — Create an adventurer and choose Swordsman or Mage.',
+            '`!profile [title name]` — View your RPG profile or equip a title.',
+            '`!class` — View class paths and unlocked skills.',
+            '`!stats [stat] [amount]` — View or spend stat points.',
+            '`!skills [unlock] [name/number]` — View or unlock skills.',
+            '`!guild` — Open the Adventurer Guild hall.',
+            '`!guildstaff [npc]` — Meet the named Guild NPCs and cycle their dialogue.',
+            '`!contracts` — Browse contracts for your current rank.',
+            '`!accept number` — Accept a contract.',
+            '`!abandon` — Abandon the active contract.',
+            '`!hunt` — Begin a contract monster encounter.',
+            '`!battle [attack/skill/defend/potion/flee]` — Resume or act in battle.',
+            '`!inventory [page]` / `!inventory use item` — Browse or use inventory items.',
+            '`!equipment [equip item]` — View or equip gear.',
+            '`!shop [buy item quantity]` — Buy guild supplies.',
+            '`!blacksmith [craft/upgrade/repair]` — Craft and improve gear.',
+            '`!sell item quantity` / `!sell allcommon` — Sell monster parts.',
+            '`!rankup` — Promote from Bronze through Platinum.',
+            '`!daily [claim]` / `!weekly [claim]` — View or claim missions.',
+            '`!dungeon [name] [Normal/Hard/Nightmare/Mythic]` — Enter a dungeon.',
+            '`!boss [name]` — View or fight available bosses.',
+            '`!party [invite/accept/leave/kick]` — Manage a four-player party.',
+            '`!achievements` / `!titles` — View unlocked honors.',
+            '`!leaderboard [level/reputation/contracts/bosses/dragons/gold/dungeons]` — View RPG rankings.',
+            '`!helprpg` — Open the focused RPG command list.',
+            '`!howrpg` — Open the beginner gameplay guide.'
         ]
     },
     {
@@ -16658,12 +20636,21 @@ async function handleMessageCreate(message) {
     const args = message.content.trim().split(/ +/);
     const command = args.shift()?.toLowerCase();
 
+    if (command === '!howrpg') {
+        await sendHowRpgGuide(message);
+        return;
+    }
+
     if (command === '!sudo') {
         await handleSudoCommand(message, args);
         return;
     }
 
     await logCommand(message);
+
+    if (await routeRpgCommand(message, command, args)) {
+        return;
+    }
 
     if (!message.content.startsWith('!') && await handleAntiRaidMessage(message)) {
         return;
@@ -16969,6 +20956,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
     // HELP COMMAND
     // ==========================================
 
+    if (command === '!helprpg') {
+        await sendRpgHelp(message);
+        return;
+    }
+
     if (command === '!help') {
         await sendHelpDirectory(message, 0);
         return;
@@ -17202,7 +21194,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
                 .setCustomId('verify_role_button')
                 .setLabel('Verify')
                 .setStyle(ButtonStyle.Success)
-                .setEmoji('✅')
+                
         );
 
         await message.channel.send({
@@ -18970,6 +22962,11 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isChatInputCommand()) {
         await handleSlashCommand(interaction);
+        return;
+    }
+
+    if ((interaction.isButton() || interaction.isStringSelectMenu()) && interaction.customId.startsWith('rpg_')) {
+        await handleRpgInteraction(interaction);
         return;
     }
 
