@@ -452,6 +452,153 @@ let vrchatAuditNextAllowedAt = 0;
 // LAVALINK / SHOUKAKU SETUP
 // ==========================================
 
+const startupLogEntries = [];
+
+function formatStartupConsoleArgs(args) {
+
+    return args
+        .map(value => {
+            if (value instanceof Error) return value.stack || value.message;
+            if (typeof value === 'string') return value;
+
+            try {
+                return JSON.stringify(value);
+            } catch {
+                return String(value);
+            }
+        })
+        .join(' ');
+
+}
+
+function queueStartupLog(level, message) {
+    startupLogEntries.push({
+        level,
+        message: String(message || '').trim()
+    });
+}
+
+function parseStartupLogEntries(entries) {
+
+    const summary = {
+        bot: [],
+        data: [],
+        vrchat: [],
+        notices: [],
+        warnings: [],
+        other: []
+    };
+
+    for (const entry of entries) {
+        const message = entry.message;
+
+        if (!message) continue;
+
+        const reactionRoles = message.match(/Loaded (\d+) reaction role mapping/);
+        const ticketConfig = message.match(/Loaded ticket config for (\d+) guild/);
+        const openTickets = message.match(/Loaded (\d+) open ticket record/);
+        const vrcVerifier = message.match(/Loaded VRC verifier config for (\d+) guild/);
+        const vrcRecords = message.match(/Loaded (\d+) VRC verification record/);
+        const rpgProfiles = message.match(/Loaded (\d+) Adventurer Guild RPG profile/);
+        const safetyBlacklist = message.match(/Loaded (\d+) VRChat safety blacklist entr/);
+        const postWatcher = message.match(/VRChat group post watcher started for ([^.]+)\./);
+        const postSeed = message.match(/VRChat group post watcher seeded (\d+) post/);
+        const auditMirror = message.match(/VRChat audit-log mirror started for ([^;]+); sending every event type to Discord channel ([^.]+)\./);
+        const safetyScanner = message.match(/VRChat safety scanner started for ([^.]+)\./);
+
+        if (/Lavalink music is disabled/.test(message)) {
+            summary.notices.push('Lavalink music disabled. Set ENABLE_LAVALINK=true with a working node to enable music commands.');
+        } else if (/Logged in as /.test(message)) {
+            summary.bot.push(message.replace(/^.*Logged in as /, 'Logged in as '));
+        } else if (/Invite cache loaded/.test(message)) {
+            summary.bot.push('Invite cache loaded.');
+        } else if (reactionRoles) {
+            summary.data.push(`${reactionRoles[1]} reaction role mapping(s).`);
+        } else if (ticketConfig) {
+            summary.data.push(`${ticketConfig[1]} ticket config guild(s).`);
+        } else if (openTickets) {
+            summary.data.push(`${openTickets[1]} open ticket record(s).`);
+        } else if (vrcVerifier) {
+            summary.data.push(`${vrcVerifier[1]} VRC verifier config guild(s).`);
+        } else if (vrcRecords) {
+            summary.data.push(`${vrcRecords[1]} VRC verification record(s).`);
+        } else if (rpgProfiles) {
+            summary.data.push(`${rpgProfiles[1]} Adventurer Guild RPG profile(s).`);
+        } else if (safetyBlacklist) {
+            summary.data.push(`${safetyBlacklist[1]} VRChat safety blacklist entry/entries.`);
+        } else if (postWatcher) {
+            summary.vrchat.push(`Group post watcher started: ${postWatcher[1]}.`);
+        } else if (postSeed) {
+            summary.vrchat.push(`Group post watcher seeded ${postSeed[1]} post(s).`);
+        } else if (auditMirror) {
+            summary.vrchat.push(`Audit-log mirror started: ${auditMirror[1]} -> Discord channel ${auditMirror[2]}.`);
+        } else if (/VRChat audit-log mirror is ready/.test(message)) {
+            summary.vrchat.push('Audit-log mirror ready; no backfill needed.');
+        } else if (/Startup VRChat safety scan skipped/.test(message)) {
+            summary.vrchat.push('Startup safety scan skipped. Set RUN_SAFETY_SCAN_ON_START=true to enable it.');
+        } else if (safetyScanner) {
+            summary.vrchat.push(`Safety scanner started: ${safetyScanner[1]}.`);
+        } else if (entry.level === 'warn') {
+            summary.warnings.push(message);
+        } else {
+            summary.other.push(message);
+        }
+    }
+
+    return summary;
+
+}
+
+function formatStartupLogSummary(entries) {
+
+    const summary = parseStartupLogEntries(entries);
+    const lines = [
+        '',
+        '================ BOT STARTUP ================',
+        '[OK] Startup complete.'
+    ];
+    const addSection = (title, values) => {
+        if (!values.length) return;
+
+        lines.push('', title);
+
+        for (const value of values) {
+            lines.push(`- ${value}`);
+        }
+    };
+
+    addSection('Bot', summary.bot);
+    addSection('Loaded Data', summary.data);
+    addSection('VRChat Systems', summary.vrchat);
+    addSection('Notices', summary.notices);
+    addSection('Warnings', summary.warnings);
+    addSection('Other Startup Logs', summary.other);
+    lines.push('=============================================');
+
+    return lines.join('\n');
+
+}
+
+function captureStartupLogs() {
+
+    const originalLog = console.log.bind(console);
+    const originalWarn = console.warn.bind(console);
+    let restored = false;
+
+    console.log = (...args) => queueStartupLog('info', formatStartupConsoleArgs(args));
+    console.warn = (...args) => queueStartupLog('warn', formatStartupConsoleArgs(args));
+
+    return () => {
+        if (restored) return;
+
+        restored = true;
+        console.log = originalLog;
+        console.warn = originalWarn;
+        originalLog(formatStartupLogSummary(startupLogEntries));
+    };
+
+}
+
 let shoukaku = null;
 
 if (ENABLE_LAVALINK) {
@@ -488,7 +635,7 @@ shoukaku.on('disconnect', (name, count) => {
 } else {
 
     client.shoukaku = null;
-    console.log('Lavalink music is disabled. Set ENABLE_LAVALINK=true with a working node to enable music commands.');
+    queueStartupLog('info', 'Lavalink music is disabled. Set ENABLE_LAVALINK=true with a working node to enable music commands.');
 
 }
 
@@ -503,6 +650,8 @@ client.on('error', (error) => {
 // ==========================================
 
 client.once('clientReady', async () => {
+
+    const flushStartupLogs = captureStartupLogs();
 
     console.log(`✅ Logged in as ${client.user.tag}`);
 
@@ -570,6 +719,12 @@ client.once('clientReady', async () => {
         registerSlashCommandsForGuilds();
     } else {
         removeRestrictedSlashCommandsForGuilds();
+    }
+
+    const startupLogFlushTimer = setTimeout(flushStartupLogs, 5000);
+
+    if (typeof startupLogFlushTimer.unref === 'function') {
+        startupLogFlushTimer.unref();
     }
 
 });
