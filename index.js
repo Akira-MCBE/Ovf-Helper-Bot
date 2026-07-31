@@ -12429,6 +12429,7 @@ function getDefaultVrchatAutoInviteStore() {
         version: 1,
         config: getDefaultVrchatAutoInviteConfig(),
         ignoredUsers: {},
+        targets: {},
         users: {},
         queue: [],
         history: []
@@ -12503,6 +12504,28 @@ function normalizeVrchatAutoInviteStore(savedStore = {}) {
         !Array.isArray(savedStore.ignoredUsers)
         ? savedStore.ignoredUsers
         : {};
+    const savedTargets = savedStore?.targets &&
+        typeof savedStore.targets === 'object' &&
+        !Array.isArray(savedStore.targets)
+        ? savedStore.targets
+        : {};
+    const targets = {};
+
+    for (const [key, value] of Object.entries(savedTargets)) {
+        const userId = normalizeVrchatAutoInviteUserId(value?.userId || key);
+
+        if (!userId) continue;
+
+        targets[userId] = {
+            userId,
+            displayName: String(value?.displayName || userId),
+            source: String(value?.source || 'target-list'),
+            addedAt: value?.addedAt || new Date().toISOString(),
+            addedBy: String(value?.addedBy || 'unknown'),
+            lastQueuedAt: value?.lastQueuedAt || null
+        };
+    }
+
     const users = savedStore?.users &&
         typeof savedStore.users === 'object' &&
         !Array.isArray(savedStore.users)
@@ -12521,6 +12544,7 @@ function normalizeVrchatAutoInviteStore(savedStore = {}) {
         version: 1,
         config,
         ignoredUsers,
+        targets,
         users,
         queue,
         history
@@ -12762,6 +12786,9 @@ function createVrchatAutoInviteScanStats(trigger) {
         authInstanceIncluded: false,
         authInstanceLocation: null,
         occupantsSeen: 0,
+        visibleInstanceUsers: 0,
+        hiddenInstanceUsers: 0,
+        targetListUsers: 0,
         candidatesFound: 0,
         eligibleUsers: 0,
         queuedInvites: 0,
@@ -12869,6 +12896,9 @@ async function sendVrchatAutoInviteScanSummary(stats) {
         ...instanceLines,
         '',
         `Occupants seen: ${stats.occupantsSeen}`,
+        `Visible instance users: ${stats.visibleInstanceUsers || 0}`,
+        `Hidden/unlisted occupants: ${stats.hiddenInstanceUsers || 0}`,
+        `Target-list users: ${stats.targetListUsers || 0}`,
         `Eligible users: ${stats.eligibleUsers}`,
         `Queued invites: ${stats.queuedInvites}`,
         `Skipped users: ${stats.skippedUsers}`,
@@ -12934,6 +12964,114 @@ function getVrchatAutoInviteUserRecord(userId, displayName = 'Unknown VRChat use
 
 function isVrchatAutoInviteIgnored(userId) {
     return Boolean(getVrchatAutoInviteStore().ignoredUsers[userId]);
+}
+
+function addVrchatAutoInviteTargets(candidates, {
+    source = 'manual',
+    addedBy = 'unknown'
+} = {}) {
+
+    const store = getVrchatAutoInviteStore();
+    let added = 0;
+    let updated = 0;
+    const nowIso = new Date().toISOString();
+
+    for (const candidate of candidates) {
+        const userId = normalizeVrchatAutoInviteUserId(
+            typeof candidate === 'string' ? candidate : candidate?.userId || candidate?.id || ''
+        );
+
+        if (!userId) continue;
+
+        const displayName = typeof candidate === 'string'
+            ? userId
+            : candidate?.displayName || candidate?.name || candidate?.user?.displayName || userId;
+        const existing = store.targets[userId];
+
+        store.targets[userId] = {
+            userId,
+            displayName: truncateText(displayName, 120),
+            source: String(source || existing?.source || 'manual'),
+            addedAt: existing?.addedAt || nowIso,
+            addedBy: existing?.addedBy || String(addedBy || 'unknown'),
+            lastQueuedAt: existing?.lastQueuedAt || null
+        };
+
+        if (existing) {
+            updated++;
+        } else {
+            added++;
+        }
+    }
+
+    saveVrchatAutoInviteStore();
+
+    return {
+        added,
+        updated,
+        total: Object.keys(store.targets).length
+    };
+
+}
+
+function removeVrchatAutoInviteTarget(userId) {
+
+    const normalizedUserId = normalizeVrchatAutoInviteUserId(userId);
+
+    if (!normalizedUserId) return false;
+
+    const store = getVrchatAutoInviteStore();
+    const existed = Boolean(store.targets[normalizedUserId]);
+
+    delete store.targets[normalizedUserId];
+    removeVrchatAutoInviteFromQueue(normalizedUserId);
+    saveVrchatAutoInviteStore();
+
+    return existed;
+
+}
+
+function getVrchatAutoInviteTargetCandidates() {
+
+    return Object.values(getVrchatAutoInviteStore().targets || {})
+        .map(target => {
+            const userId = normalizeVrchatAutoInviteUserId(target?.userId || '');
+
+            if (!userId) return null;
+
+            return {
+                userId,
+                displayName: target.displayName || userId,
+                instanceId: target.source || 'target-list',
+                worldName: null,
+                seenAt: new Date().toISOString(),
+                source: 'target-list'
+            };
+        })
+        .filter(Boolean);
+
+}
+
+function getVrchatAutoInviteLinkedCandidates(guildId = null) {
+
+    return [...vrcVerificationRecords.values()]
+        .filter(record => !guildId || record.guildId === guildId)
+        .map(record => {
+            const userId = normalizeVrchatAutoInviteUserId(record.vrcUserId);
+
+            if (!userId) return null;
+
+            return {
+                userId,
+                displayName: record.vrcDisplayName || userId,
+                instanceId: 'discord-linked',
+                worldName: null,
+                seenAt: new Date().toISOString(),
+                source: 'discord-linked'
+            };
+        })
+        .filter(Boolean);
+
 }
 
 function removeVrchatAutoInviteFromQueue(userId) {
@@ -13158,11 +13296,61 @@ function getVrchatAutoInviteInstanceLabel(instance) {
 
 function getVrchatAutoInviteInstanceUsers(instance) {
 
-    if (Array.isArray(instance?.users)) return instance.users;
-    if (Array.isArray(instance?.players)) return instance.players;
-    if (Array.isArray(instance?.occupants)) return instance.occupants;
+    const users = [];
+    const seenUserIds = new Set();
+    const addUser = (value, fallback = {}) => {
+        if (!value) return;
 
-    return [];
+        if (typeof value === 'string') {
+            const ids = extractVrchatAutoInviteUserIdsFromText(value);
+
+            for (const userId of ids) {
+                if (seenUserIds.has(userId)) continue;
+                seenUserIds.add(userId);
+                users.push({
+                    id: userId,
+                    userId,
+                    displayName: fallback.displayName || userId
+                });
+            }
+
+            return;
+        }
+
+        const userId = normalizeVrchatAutoInviteUserId(value.id || value.userId || value.user?.id || '');
+
+        if (!userId || seenUserIds.has(userId)) return;
+
+        seenUserIds.add(userId);
+        users.push({
+            ...value,
+            id: userId,
+            userId,
+            displayName: value.displayName || value.username || value.name || value.user?.displayName || userId
+        });
+    };
+    const addArray = (values) => {
+        if (!Array.isArray(values)) return;
+
+        for (const value of values) {
+            addUser(value);
+        }
+    };
+
+    addArray(instance?.users);
+    addArray(instance?.players);
+    addArray(instance?.occupants);
+    addArray(instance?.friendUsers);
+    addArray(instance?.friends);
+
+    addUser(instance?.friends, {
+        displayName: 'VRChat friend'
+    });
+    addUser(instance?.friendIds, {
+        displayName: 'VRChat friend'
+    });
+
+    return users;
 
 }
 
@@ -13467,10 +13655,15 @@ async function collectVrchatAutoInviteCandidates(scanStats = null) {
 
         const instanceId = getVrchatAutoInviteInstanceLabel(detailedInstance || instance);
         const worldName = detailedInstance?.world?.name || instance?.world?.name || null;
-        const occupantCount = users.length || getVrchatAutoInviteInstanceUserCount(detailedInstance || instance);
+        const reportedOccupantCount = getVrchatAutoInviteInstanceUserCount(detailedInstance || instance);
+        const occupantCount = Math.max(users.length, reportedOccupantCount);
+        const visibleUserCount = users.length;
+        const hiddenUserCount = Math.max(0, occupantCount - visibleUserCount);
 
         if (scanStats) {
             scanStats.occupantsSeen += occupantCount;
+            scanStats.visibleInstanceUsers += visibleUserCount;
+            scanStats.hiddenInstanceUsers += hiddenUserCount;
             scanStats.instances.push({
                 instanceId,
                 worldName,
@@ -13480,6 +13673,13 @@ async function collectVrchatAutoInviteCandidates(scanStats = null) {
             pushVrchatAutoInviteScanLine(scanStats, `  World: ${worldName || 'Unknown world'}`);
             pushVrchatAutoInviteScanLine(scanStats, `  Instance ID: ${instanceId}`);
             pushVrchatAutoInviteScanLine(scanStats, `  Occupants: ${occupantCount}`);
+            pushVrchatAutoInviteScanLine(scanStats, `  Visible user IDs: ${visibleUserCount}`);
+            if (hiddenUserCount > 0) {
+                pushVrchatAutoInviteScanLine(
+                    scanStats,
+                    `  VRChat did not expose ${hiddenUserCount} occupant user ID(s), so those people cannot be auto-invited from the scan alone.`
+                );
+            }
         }
 
         for (const user of users) {
@@ -13500,6 +13700,25 @@ async function collectVrchatAutoInviteCandidates(scanStats = null) {
 
         }
 
+    }
+
+    const targetCandidates = getVrchatAutoInviteTargetCandidates();
+
+    if (scanStats) {
+        scanStats.targetListUsers = targetCandidates.length;
+
+        if (targetCandidates.length > 0) {
+            pushVrchatAutoInviteScanLine(scanStats, '');
+            pushVrchatAutoInviteScanLine(scanStats, `Target list users: ${targetCandidates.length}`);
+        }
+    }
+
+    for (const candidate of targetCandidates) {
+        if (authUserId && candidate.userId === authUserId) continue;
+
+        if (!candidates.has(candidate.userId)) {
+            candidates.set(candidate.userId, candidate);
+        }
     }
 
     if (scanStats) {
@@ -13947,6 +14166,9 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     record.status = 'queued';
     record.updatedAt = new Date().toISOString();
+    if (getVrchatAutoInviteStore().targets[candidate.userId]) {
+        getVrchatAutoInviteStore().targets[candidate.userId].lastQueuedAt = record.updatedAt;
+    }
     saveVrchatAutoInviteStore();
 
     if (scanStats) {
@@ -14595,6 +14817,9 @@ function getVrchatAutoInviteStatusText() {
         `Auth Instance Included: ${lastScan.authInstanceIncluded ? 'yes' : 'no'}.`,
         lastScan.authInstanceLocation ? `Auth Instance: ${lastScan.authInstanceLocation}.` : null,
         `Occupants Seen: ${lastScan.occupantsSeen || 0}.`,
+        `Visible Instance User IDs: ${lastScan.visibleInstanceUsers || 0}.`,
+        `Hidden/Unlisted Occupants: ${lastScan.hiddenInstanceUsers || 0}.`,
+        `Target List Users: ${Object.keys(getVrchatAutoInviteStore().targets || {}).length}.`,
         `Candidate Users: ${lastScan.candidatesFound || 0}.`,
         `Eligible Users: ${lastScan.eligibleUsers || 0}.`,
         `Skipped Users: ${lastScan.skippedUsers || 0}.`,
@@ -14624,7 +14849,11 @@ function getVrchatAutoInviteUsage() {
         '`!autoinvite off`',
         '`!autoinvite status`',
         '`!autoinvite run`',
+        '`!autoinvite add <vrchat user id ...>`',
         '`!autoinvite import` with a .txt attachment or pasted VRChat user IDs',
+        '`!autoinvite linked` queue all Discord-verified VRChat accounts in this server',
+        '`!autoinvite targets`',
+        '`!autoinvite removetarget <vrchat user id>`',
         '`!autoinvite force on/off`',
         '`!autoinvite myinstance on/off`',
         '`!autoinvite cooldown <hours>`',
@@ -14658,6 +14887,152 @@ function getVrchatAutoInviteQueueText() {
     }
 
     return lines.join('\n');
+
+}
+
+function getVrchatAutoInviteTargetsText() {
+
+    const targets = Object.values(getVrchatAutoInviteStore().targets || {});
+
+    if (!targets.length) return 'The auto-invite target list is empty.';
+
+    const lines = targets.slice(0, 20).map((target, index) =>
+        `${index + 1}. ${target.displayName || target.userId} - \`${target.userId}\` - ${target.source || 'target-list'}`
+    );
+
+    if (targets.length > lines.length) {
+        lines.push(`...and ${targets.length - lines.length} more target(s).`);
+    }
+
+    return lines.join('\n');
+
+}
+
+async function queueVrchatAutoInviteCandidatesFromCommand(message, candidates, {
+    source = 'manual-command',
+    persistTargets = true,
+    force = false,
+    front = false,
+    statusLabel = 'Auto-invite'
+} = {}) {
+
+    const missingSettings = getVrchatAutoInviteMissingSettings();
+
+    if (missingSettings.length) {
+        await message.reply(`${statusLabel} cannot run yet. Missing: ${missingSettings.join(', ')}.`);
+        return null;
+    }
+
+    const uniqueCandidates = new Map();
+
+    for (const candidate of candidates) {
+        const userId = normalizeVrchatAutoInviteUserId(
+            typeof candidate === 'string' ? candidate : candidate?.userId || candidate?.id || ''
+        );
+
+        if (!userId) continue;
+
+        uniqueCandidates.set(userId, {
+            userId,
+            displayName: typeof candidate === 'string'
+                ? userId
+                : candidate.displayName || candidate.name || candidate.user?.displayName || userId,
+            instanceId: source,
+            worldName: null,
+            seenAt: new Date().toISOString()
+        });
+    }
+
+    const candidateList = [...uniqueCandidates.values()];
+
+    if (!candidateList.length) {
+        await message.reply('I could not find any valid VRChat user IDs.');
+        return null;
+    }
+
+    const targetSummary = persistTargets
+        ? addVrchatAutoInviteTargets(candidateList, {
+            source,
+            addedBy: message.author.id
+        })
+        : {
+            added: 0,
+            updated: 0,
+            total: Object.keys(getVrchatAutoInviteStore().targets || {}).length
+        };
+    const statusMessage = await message.reply(
+        `${statusLabel}: checking ${candidateList.length} VRChat user ID(s) and queueing invites...`
+    );
+    const summary = {
+        queued: 0,
+        skipped: 0,
+        alreadyQueued: 0,
+        failed: 0
+    };
+    const failedSamples = [];
+    const skippedSamples = [];
+    let stoppedReason = null;
+
+    await refreshVrchatAutoInvitePendingCache(false).catch(error => {
+        console.warn('Failed to refresh pending auto-invites before queueing command:', error.message);
+    });
+
+    for (const [index, candidate] of candidateList.entries()) {
+        try {
+            const outcome = await evaluateVrchatAutoInviteCandidate(candidate, {
+                manual: true,
+                force,
+                front
+            });
+
+            if (outcome === 'queued') summary.queued++;
+            if (outcome === 'already-queued') summary.alreadyQueued++;
+            if (outcome === 'skipped') {
+                summary.skipped++;
+                if (skippedSamples.length < 5) skippedSamples.push(candidate.userId);
+            }
+        } catch (error) {
+            summary.failed++;
+            if (failedSamples.length < 5) {
+                failedSamples.push(`${candidate.userId}: ${truncateText(error.message || String(error), 160)}`);
+            }
+            if (isVrchatRateLimitError(error)) {
+                stoppedReason = error.message;
+                break;
+            }
+        }
+
+        if ((index + 1) % 10 === 0 || index === candidateList.length - 1) {
+            await statusMessage.edit(
+                `${statusLabel}: ${index + 1}/${candidateList.length} checked. Queued ${summary.queued}, skipped ${summary.skipped}, already queued ${summary.alreadyQueued}, failed ${summary.failed}.`
+            ).catch(() => {});
+        }
+    }
+
+    if (summary.queued > 0) {
+        scheduleVrchatAutoInviteQueue(0);
+    }
+
+    const responseLines = [
+        `${statusLabel} finished.`,
+        `Found: ${candidateList.length}`,
+        persistTargets ? `Target list added: ${targetSummary.added}` : null,
+        persistTargets ? `Target list already tracked/updated: ${targetSummary.updated}` : null,
+        persistTargets ? `Target list total: ${targetSummary.total}` : null,
+        `Queued: ${summary.queued}`,
+        `Already queued: ${summary.alreadyQueued}`,
+        `Skipped: ${summary.skipped}`,
+        `Failed: ${summary.failed}`,
+        stoppedReason ? `Stopped early: ${truncateText(stoppedReason, 300)}` : null,
+        skippedSamples.length ? `Sample skipped IDs: ${skippedSamples.map(userId => `\`${userId}\``).join(', ')}` : null,
+        failedSamples.length ? `Sample failures:\n${failedSamples.map(sample => `- ${sample}`).join('\n')}` : null,
+        getVrchatAutoInviteConfig().enabled
+            ? 'Queue worker: running now.'
+            : 'Queue worker: paused because auto-invite is off. Run `!autoinvite on` to send queued invites.'
+    ].filter(Boolean).join('\n');
+
+    await statusMessage.edit(truncateText(responseLines, 1900)).catch(() => {});
+    return summary;
 
 }
 
@@ -14761,6 +15136,9 @@ async function handleVrchatAutoInviteCommand(message, args) {
         const scanResponse = [
             'VRChat auto-invite scan finished.',
             `Candidates: ${latestScan.candidatesFound || result.candidates || 0}`,
+            `Visible Instance User IDs: ${latestScan.visibleInstanceUsers || 0}`,
+            `Hidden/Unlisted Occupants: ${latestScan.hiddenInstanceUsers || 0}`,
+            `Target List Users: ${latestScan.targetListUsers || 0}`,
             `Eligible: ${latestScan.eligibleUsers || 0}`,
             `Queued: ${latestScan.queuedInvites || result.queued || 0}`,
             `Skipped: ${latestScan.skippedUsers || result.skipped || 0}`,
@@ -14773,6 +15151,56 @@ async function handleVrchatAutoInviteCommand(message, args) {
 
         return;
 
+    }
+
+    if (subcommand === 'add' || subcommand === 'target' || subcommand === 'queueid') {
+        const userIds = extractVrchatAutoInviteUserIdsFromText(args.join(' '));
+
+        if (!userIds.length) {
+            return message.reply('Usage: `!autoinvite add <vrchat user id ...>`');
+        }
+
+        await queueVrchatAutoInviteCandidatesFromCommand(message, userIds, {
+            source: 'manual-add',
+            persistTargets: true,
+            statusLabel: 'VRChat auto-invite add'
+        });
+        return;
+    }
+
+    if (subcommand === 'linked' || subcommand === 'verified') {
+        const candidates = getVrchatAutoInviteLinkedCandidates(message.guild.id);
+
+        if (!candidates.length) {
+            return message.reply('No Discord-verified VRChat accounts are stored for this server yet.');
+        }
+
+        await queueVrchatAutoInviteCandidatesFromCommand(message, candidates, {
+            source: 'discord-linked',
+            persistTargets: true,
+            statusLabel: 'VRChat auto-invite linked users'
+        });
+        return;
+    }
+
+    if (subcommand === 'targets' || subcommand === 'targetlist') {
+        return message.channel.send(getVrchatAutoInviteTargetsText());
+    }
+
+    if (subcommand === 'removetarget' || subcommand === 'untarget' || subcommand === 'remove') {
+        const userId = normalizeVrchatAutoInviteUserId(args[0]);
+
+        if (!userId) {
+            return message.reply('Usage: `!autoinvite removetarget <vrchat user id>`');
+        }
+
+        const removed = removeVrchatAutoInviteTarget(userId);
+
+        return message.reply(
+            removed
+                ? `Removed \`${userId}\` from the auto-invite target list and queue.`
+                : `\`${userId}\` was not on the auto-invite target list.`
+        );
     }
 
     if (
@@ -14809,82 +15237,15 @@ async function handleVrchatAutoInviteCommand(message, args) {
             );
         }
 
-        const statusMessage = await message.reply(
-            `Found ${userIds.length} unique VRChat user ID(s). Checking and queueing invites...`
-        );
         const importSource = attachment
             ? `manual-import:${truncateText(attachment.name || 'attachment', 80)}`
             : 'manual-import:pasted';
-        const summary = {
-            queued: 0,
-            skipped: 0,
-            alreadyQueued: 0,
-            failed: 0
-        };
-        const failedSamples = [];
-        const skippedSamples = [];
-        let stoppedReason = null;
 
-        await refreshVrchatAutoInvitePendingCache(false).catch(error => {
-            console.warn('Failed to refresh pending auto-invites before import:', error.message);
+        await queueVrchatAutoInviteCandidatesFromCommand(message, userIds, {
+            source: importSource,
+            persistTargets: true,
+            statusLabel: 'VRChat auto-invite import'
         });
-
-        for (const [index, userId] of userIds.entries()) {
-            try {
-                const outcome = await evaluateVrchatAutoInviteCandidate({
-                    userId,
-                    displayName: userId,
-                    instanceId: importSource,
-                    worldName: null,
-                    seenAt: new Date().toISOString()
-                }, {
-                    manual: true
-                });
-
-                if (outcome === 'queued') summary.queued++;
-                if (outcome === 'already-queued') summary.alreadyQueued++;
-                if (outcome === 'skipped') {
-                    summary.skipped++;
-                    if (skippedSamples.length < 5) skippedSamples.push(userId);
-                }
-            } catch (error) {
-                summary.failed++;
-                if (failedSamples.length < 5) {
-                    failedSamples.push(`${userId}: ${truncateText(error.message || String(error), 160)}`);
-                }
-                if (isVrchatRateLimitError(error)) {
-                    stoppedReason = error.message;
-                    break;
-                }
-            }
-
-            if ((index + 1) % 10 === 0 || index === userIds.length - 1) {
-                await statusMessage.edit(
-                    `Import progress: ${index + 1}/${userIds.length} checked. Queued ${summary.queued}, skipped ${summary.skipped}, already queued ${summary.alreadyQueued}, failed ${summary.failed}.`
-                ).catch(() => {});
-            }
-        }
-
-        if (summary.queued > 0) {
-            scheduleVrchatAutoInviteQueue(0);
-        }
-
-        const responseLines = [
-            'VRChat auto-invite import finished.',
-            `Found: ${userIds.length}`,
-            `Queued: ${summary.queued}`,
-            `Already queued: ${summary.alreadyQueued}`,
-            `Skipped: ${summary.skipped}`,
-            `Failed: ${summary.failed}`,
-            stoppedReason ? `Stopped early: ${truncateText(stoppedReason, 300)}` : null,
-            skippedSamples.length ? `Sample skipped IDs: ${skippedSamples.map(userId => `\`${userId}\``).join(', ')}` : null,
-            failedSamples.length ? `Sample failures:\n${failedSamples.map(sample => `- ${sample}`).join('\n')}` : null,
-            config.enabled
-                ? 'Queue worker: running now.'
-                : 'Queue worker: paused because auto-invite is off. Run `!autoinvite on` to send queued invites.'
-        ].filter(Boolean).join('\n');
-
-        await statusMessage.edit(truncateText(responseLines, 1900)).catch(() => {});
         return;
 
     }
