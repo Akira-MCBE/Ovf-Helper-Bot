@@ -13524,6 +13524,113 @@ async function fetchVrchatAutoInviteInstanceDetail(instance) {
 
 }
 
+function collectVrchatAutoInviteUserIdPathSamples(value, pathName = 'root', output = [], depth = 0) {
+
+    if (output.length >= 25 || depth > 5 || value === null || value === undefined) return output;
+
+    if (typeof value === 'string') {
+        const userIds = extractVrchatAutoInviteUserIdsFromText(value);
+
+        for (const userId of userIds) {
+            if (output.length >= 25) break;
+            output.push({
+                path: pathName,
+                userId
+            });
+        }
+
+        return output;
+    }
+
+    if (Array.isArray(value)) {
+        for (const [index, item] of value.entries()) {
+            collectVrchatAutoInviteUserIdPathSamples(item, `${pathName}[${index}]`, output, depth + 1);
+            if (output.length >= 25) break;
+        }
+
+        return output;
+    }
+
+    if (typeof value === 'object') {
+        for (const [key, nestedValue] of Object.entries(value)) {
+            collectVrchatAutoInviteUserIdPathSamples(nestedValue, `${pathName}.${key}`, output, depth + 1);
+            if (output.length >= 25) break;
+        }
+    }
+
+    return output;
+
+}
+
+function getVrchatAutoInviteProbeArrayLine(label, value) {
+
+    if (!Array.isArray(value)) return `${label}: not present`;
+
+    return `${label}: array length ${value.length}`;
+
+}
+
+async function getVrchatAutoInviteAuthInstanceProbeText() {
+
+    if (!VRCHAT_AUTH_COOKIE) {
+        return 'VRChat auth cookie is missing.';
+    }
+
+    const authUser = await fetchVrchatAutoInviteAuthUser();
+    const authUserId = normalizeVrchatAutoInviteUserId(authUser?.id || '');
+    const authLocation = getVrchatAutoInviteAuthUserLocation(authUser);
+
+    if (!authLocation) {
+        return [
+            'Authenticated account current instance was not visible to the API.',
+            `Auth user: ${authUser?.displayName || authUserId || 'unknown'} (${authUserId || 'unknown'})`,
+            `State: ${authUser?.state || 'unknown'}`,
+            `Status: ${authUser?.status || 'unknown'}`
+        ].join('\n');
+    }
+
+    const detail = await fetchVrchatAutoInviteInstanceDetail({
+        location: authLocation,
+        source: 'auth-user-probe'
+    });
+
+    if (!detail) {
+        return `Could not fetch instance detail for auth location: ${authLocation}`;
+    }
+
+    const visibleUsers = getVrchatAutoInviteInstanceUsers(detail)
+        .filter(user => !authUserId || user.userId !== authUserId);
+    const reportedOccupants = getVrchatAutoInviteInstanceUserCount(detail);
+    const hiddenOccupants = Math.max(0, reportedOccupants - visibleUsers.length);
+    const topLevelKeys = Object.keys(detail).sort();
+    const userIdPathSamples = collectVrchatAutoInviteUserIdPathSamples(detail)
+        .filter(sample => sample.userId !== authUserId)
+        .slice(0, 10);
+
+    return [
+        'VRChat auth-instance probe:',
+        `Auth user: ${authUser?.displayName || authUserId || 'unknown'} (${authUserId || 'unknown'})`,
+        `Auth location: ${authLocation}`,
+        `World: ${detail?.world?.name || detail?.worldName || 'unknown'}`,
+        `Reported occupants: ${reportedOccupants}`,
+        `Visible occupant user IDs usable for auto-invite: ${visibleUsers.length}`,
+        `Hidden/unlisted occupants: ${hiddenOccupants}`,
+        getVrchatAutoInviteProbeArrayLine('detail.users', detail.users),
+        getVrchatAutoInviteProbeArrayLine('detail.players', detail.players),
+        getVrchatAutoInviteProbeArrayLine('detail.occupants', detail.occupants),
+        getVrchatAutoInviteProbeArrayLine('detail.friendUsers', detail.friendUsers),
+        getVrchatAutoInviteProbeArrayLine('detail.friends', detail.friends),
+        `Top-level fields: ${topLevelKeys.slice(0, 35).join(', ') || 'none'}`,
+        userIdPathSamples.length
+            ? `Sample usr_ paths found anywhere in payload:\n${userIdPathSamples.map(sample => `- ${sample.path}: ${sample.userId}`).join('\n')}`
+            : 'No non-auth-account usr_ IDs were found anywhere in the instance payload.',
+        visibleUsers.length
+            ? 'Result: `!autoinvite run` can invite visible age-verified users from this response.'
+            : 'Result: VRChat did not expose occupant user IDs in this response, so the bot has no user IDs to age-check or invite.'
+    ].join('\n');
+
+}
+
 async function collectVrchatAutoInviteCandidates(scanStats = null) {
 
     const config = getVrchatAutoInviteConfig();
@@ -14831,6 +14938,7 @@ function getVrchatAutoInviteUsage() {
         '`!autoinvite off`',
         '`!autoinvite status`',
         '`!autoinvite run`',
+        '`!autoinvite probe`',
         '`!autoinvite add <vrchat user id ...>`',
         '`!autoinvite import` with a .txt attachment or pasted VRChat user IDs',
         '`!autoinvite targets`',
@@ -15129,6 +15237,22 @@ async function handleVrchatAutoInviteCommand(message, args) {
         ].join('\n');
 
         await statusMessage.edit(truncateText(scanResponse, 1900)).catch(() => {});
+
+        return;
+
+    }
+
+    if (subcommand === 'probe' || subcommand === 'debuginstance' || subcommand === 'rawinstance') {
+        const statusMessage = await message.reply('Probing the authenticated VRChat account current instance...');
+
+        try {
+            const probeText = await getVrchatAutoInviteAuthInstanceProbeText();
+
+            await statusMessage.edit(truncateText(probeText, 1900)).catch(() => {});
+        } catch (error) {
+            await statusMessage.edit(`VRChat auth-instance probe failed: ${truncateText(error.message || String(error), 1500)}`)
+                .catch(() => {});
+        }
 
         return;
 
