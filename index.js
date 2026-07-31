@@ -351,7 +351,7 @@ const VRCHAT_AUTO_INVITE_LOG_CHANNEL_ID = process.env.VRCHAT_AUTO_INVITE_LOG_CHA
 const VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID = process.env.VRCHAT_AUTO_INVITE_WELCOME_CHANNEL_ID || '';
 const VRCHAT_AUTO_INVITE_JOIN_ROLE_ID = process.env.VRCHAT_AUTO_INVITE_JOIN_ROLE_ID || '';
 const DEFAULT_VRCHAT_AUTO_INVITE_ENABLED = process.env.VRCHAT_AUTO_INVITE_ENABLED === 'true';
-const DEFAULT_VRCHAT_AUTO_INVITE_FORCE_INVITES = process.env.VRCHAT_AUTO_INVITE_FORCE_INVITES !== 'false';
+const DEFAULT_VRCHAT_AUTO_INVITE_FORCE_INVITES = process.env.VRCHAT_AUTO_INVITE_FORCE_INVITES === 'true';
 const DEFAULT_VRCHAT_AUTO_INVITE_INCLUDE_AUTH_INSTANCE = process.env.VRCHAT_AUTO_INVITE_INCLUDE_AUTH_INSTANCE !== 'false';
 const DEFAULT_VRCHAT_AUTO_INVITE_COOLDOWN_HOURS = Math.max(
     1,
@@ -13052,28 +13052,6 @@ function getVrchatAutoInviteTargetCandidates() {
 
 }
 
-function getVrchatAutoInviteLinkedCandidates(guildId = null) {
-
-    return [...vrcVerificationRecords.values()]
-        .filter(record => !guildId || record.guildId === guildId)
-        .map(record => {
-            const userId = normalizeVrchatAutoInviteUserId(record.vrcUserId);
-
-            if (!userId) return null;
-
-            return {
-                userId,
-                displayName: record.vrcDisplayName || userId,
-                instanceId: 'discord-linked',
-                worldName: null,
-                seenAt: new Date().toISOString(),
-                source: 'discord-linked'
-            };
-        })
-        .filter(Boolean);
-
-}
-
 function removeVrchatAutoInviteFromQueue(userId) {
 
     const store = getVrchatAutoInviteStore();
@@ -13989,6 +13967,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     const config = getVrchatAutoInviteConfig();
     const shouldForceInvite = force || config.forceInvites;
+    const shouldBypassAgeVerification = force === true;
     const record = getVrchatAutoInviteUserRecord(candidate.userId, candidate.displayName);
     const nowIso = new Date().toISOString();
 
@@ -14028,14 +14007,14 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     let ageVerification = {
         verified: null,
-        reason: config.forceInvites
-            ? 'Age-verification check bypassed by force invite mode.'
+        reason: shouldBypassAgeVerification
+            ? 'Age-verification check bypassed by explicit manual force.'
             : 'Age-verification check bypassed.',
         user: candidate.user || null,
         result: null
     };
 
-    if (!shouldForceInvite) {
+    if (!shouldBypassAgeVerification) {
         ageVerification = await getVrchatAutoInviteAgeVerification(candidate);
     }
 
@@ -14052,7 +14031,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
     record.lastAgeVerificationCheckedAt = new Date().toISOString();
     saveVrchatAutoInviteStore();
 
-    if (!shouldForceInvite && !ageVerification.verified) {
+    if (!shouldBypassAgeVerification && !ageVerification.verified) {
         if (scanStats) {
             incrementVrchatAutoInviteSkipReason(scanStats, ageVerification.result?.unknown
                 ? 'Age verification not exposed'
@@ -14070,8 +14049,10 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
         return 'skipped';
     }
 
-    if (shouldForceInvite && scanStats) {
-        pushVrchatAutoInviteScanLine(scanStats, 'OK Force invite mode bypassed age verification');
+    if (shouldBypassAgeVerification && scanStats) {
+        pushVrchatAutoInviteScanLine(scanStats, 'OK Explicit manual force bypassed age verification');
+    } else if (shouldForceInvite && scanStats) {
+        pushVrchatAutoInviteScanLine(scanStats, 'OK Force invite mode bypassed cooldown/retry checks');
     }
 
     if (!force && await isVrchatAutoInviteGroupMember(candidate.userId, {
@@ -14173,7 +14154,7 @@ async function evaluateVrchatAutoInviteCandidate(candidate, {
 
     if (scanStats) {
         scanStats.eligibleUsers++;
-        pushVrchatAutoInviteScanLine(scanStats, shouldForceInvite ? 'OK Force invite allowed' : 'OK User is age verified');
+        pushVrchatAutoInviteScanLine(scanStats, shouldBypassAgeVerification ? 'OK Explicit manual force allowed' : 'OK User is age verified');
         pushVrchatAutoInviteScanLine(scanStats, 'OK Not in group');
         pushVrchatAutoInviteScanLine(scanStats, 'OK Not on cooldown');
         pushVrchatAutoInviteScanLine(scanStats, 'OK Eligible');
@@ -14211,6 +14192,7 @@ async function processVrchatAutoInviteQueueEntry(entry) {
 
     const config = getVrchatAutoInviteConfig();
     const shouldForceInvite = entry.force || config.forceInvites;
+    const shouldBypassAgeVerification = entry.force === true;
     const candidate = {
         userId: entry.userId,
         displayName: entry.displayName || entry.userId,
@@ -14234,14 +14216,14 @@ async function processVrchatAutoInviteQueueEntry(entry) {
 
     let ageVerification = {
         verified: null,
-        reason: config.forceInvites
-            ? 'Age-verification check bypassed by force invite mode.'
+        reason: shouldBypassAgeVerification
+            ? 'Age-verification check bypassed by explicit manual force.'
             : 'Age-verification check bypassed.',
         user: null,
         result: null
     };
 
-    if (!shouldForceInvite) {
+    if (!shouldBypassAgeVerification) {
         ageVerification = await getVrchatAutoInviteAgeVerification(candidate);
     }
 
@@ -14255,7 +14237,7 @@ async function processVrchatAutoInviteQueueEntry(entry) {
     record.lastAgeVerificationCheckedAt = new Date().toISOString();
     saveVrchatAutoInviteStore();
 
-    if (!shouldForceInvite && !ageVerification.verified) {
+    if (!shouldBypassAgeVerification && !ageVerification.verified) {
         await recordVrchatAutoInviteEvent({
             status: 'skipped',
             reason: ageVerification.reason,
@@ -14851,7 +14833,6 @@ function getVrchatAutoInviteUsage() {
         '`!autoinvite run`',
         '`!autoinvite add <vrchat user id ...>`',
         '`!autoinvite import` with a .txt attachment or pasted VRChat user IDs',
-        '`!autoinvite linked` queue all Discord-verified VRChat accounts in this server',
         '`!autoinvite targets`',
         '`!autoinvite removetarget <vrchat user id>`',
         '`!autoinvite force on/off`',
@@ -15093,7 +15074,7 @@ async function handleVrchatAutoInviteCommand(message, args) {
         if (mode === 'on' || mode === 'true' || mode === 'enable' || mode === 'enabled') {
             config.forceInvites = true;
             saveVrchatAutoInviteStore();
-            return message.reply('Force invites are now **on**. Age-verification, cooldown, and retry-limit blocks will be bypassed.');
+            return message.reply('Force invites are now **on**. Cooldown and retry-limit blocks will be bypassed, but automatic instance invites still require age verification.');
         }
 
         if (mode === 'off' || mode === 'false' || mode === 'disable' || mode === 'disabled') {
@@ -15164,21 +15145,6 @@ async function handleVrchatAutoInviteCommand(message, args) {
             source: 'manual-add',
             persistTargets: true,
             statusLabel: 'VRChat auto-invite add'
-        });
-        return;
-    }
-
-    if (subcommand === 'linked' || subcommand === 'verified') {
-        const candidates = getVrchatAutoInviteLinkedCandidates(message.guild.id);
-
-        if (!candidates.length) {
-            return message.reply('No Discord-verified VRChat accounts are stored for this server yet.');
-        }
-
-        await queueVrchatAutoInviteCandidatesFromCommand(message, candidates, {
-            source: 'discord-linked',
-            persistTargets: true,
-            statusLabel: 'VRChat auto-invite linked users'
         });
         return;
     }
