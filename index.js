@@ -403,6 +403,13 @@ const VRCHAT_AUTO_INVITE_SKIP_LOG_COOLDOWN_MS = Math.max(
     60 * 1000,
     Number.parseInt(process.env.VRCHAT_AUTO_INVITE_SKIP_LOG_COOLDOWN_MS || '', 10) || 60 * 60 * 1000
 );
+const VRCHAT_AUTO_INVITE_IMPORT_MAX_BYTES = Math.max(
+    1024,
+    Number.parseInt(process.env.VRCHAT_AUTO_INVITE_IMPORT_MAX_BYTES || `${512 * 1024}`, 10) || 512 * 1024
+);
+const VRCHAT_CURRENT_USER_ID_REGEX = /usr_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
+const VRCHAT_CURRENT_USER_ID_GLOBAL_REGEX = /usr_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
+const VRCHAT_LEGACY_USER_ID_REGEX = /^(?!\d{17,20}$)[A-Za-z0-9]{8,32}$/;
 const BOT_OWNER_IDS = (process.env.BOT_OWNER_IDS || process.env.BOT_OWNER_ID || '')
     .split(',')
     .map(userId => userId.trim())
@@ -12576,7 +12583,141 @@ function getVrchatAutoInviteMissingSettings() {
 }
 
 function normalizeVrchatAutoInviteUserId(input) {
-    return extractVrcUserIdFromInput(input);
+
+    const text = String(input || '').trim();
+
+    if (!text) return null;
+
+    const currentIdMatch = text.match(VRCHAT_CURRENT_USER_ID_REGEX);
+
+    if (currentIdMatch) return currentIdMatch[0];
+
+    const cleanedText = text
+        .replace(/^https?:\/\/vrchat\.com\/home\/user\//i, '')
+        .replace(/^<|>$/g, '')
+        .trim();
+    const tokens = cleanedText
+        .split(/[\s,;()[\]{}"'`]+/)
+        .map(token => token.trim())
+        .filter(Boolean);
+
+    for (const token of tokens.length ? tokens : [cleanedText]) {
+        if (VRCHAT_LEGACY_USER_ID_REGEX.test(token)) {
+            return token;
+        }
+    }
+
+    return null;
+
+}
+
+function extractVrchatAutoInviteUserIdsFromText(text) {
+
+    const userIds = new Set();
+    const body = String(text || '');
+    const currentIds = body.match(VRCHAT_CURRENT_USER_ID_GLOBAL_REGEX) || [];
+
+    for (const userId of currentIds) {
+        userIds.add(userId);
+    }
+
+    for (const rawLine of body.split(/\r?\n/)) {
+        const line = rawLine.replace(VRCHAT_CURRENT_USER_ID_GLOBAL_REGEX, ' ');
+        const tokens = line
+            .split(/[\s,;()[\]{}"'`<>]+/)
+            .map(token => token.trim())
+            .filter(Boolean);
+
+        for (const token of tokens) {
+            if (VRCHAT_LEGACY_USER_ID_REGEX.test(token)) {
+                userIds.add(token);
+            }
+        }
+    }
+
+    return [...userIds];
+
+}
+
+function decodeVrchatAutoInviteImportBuffer(buffer) {
+
+    if (!Buffer.isBuffer(buffer)) return '';
+
+    if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE) {
+        return buffer.subarray(2).toString('utf16le');
+    }
+
+    if (buffer.length >= 2 && buffer[0] === 0xFE && buffer[1] === 0xFF) {
+        const swapped = Buffer.from(buffer.subarray(2));
+
+        for (let index = 0; index + 1 < swapped.length; index += 2) {
+            const first = swapped[index];
+            swapped[index] = swapped[index + 1];
+            swapped[index + 1] = first;
+        }
+
+        return swapped.toString('utf16le');
+    }
+
+    const sample = buffer.subarray(0, Math.min(buffer.length, 2048));
+    let nulEven = 0;
+    let nulOdd = 0;
+
+    for (let index = 0; index < sample.length; index++) {
+        if (sample[index] !== 0) continue;
+        if (index % 2 === 0) {
+            nulEven++;
+        } else {
+            nulOdd++;
+        }
+    }
+
+    if (nulOdd > sample.length / 8) {
+        return buffer.toString('utf16le');
+    }
+
+    if (nulEven > sample.length / 8) {
+        const swapped = Buffer.from(buffer);
+
+        for (let index = 0; index + 1 < swapped.length; index += 2) {
+            const first = swapped[index];
+            swapped[index] = swapped[index + 1];
+            swapped[index + 1] = first;
+        }
+
+        return swapped.toString('utf16le');
+    }
+
+    return buffer.toString('utf8');
+
+}
+
+async function readVrchatAutoInviteImportAttachment(attachment) {
+
+    if (!attachment?.url) {
+        throw new Error('No attachment URL was found.');
+    }
+
+    const advertisedSize = Number(attachment.size || 0);
+
+    if (advertisedSize > VRCHAT_AUTO_INVITE_IMPORT_MAX_BYTES) {
+        throw new Error(`Attachment is too large. Max size is ${Math.ceil(VRCHAT_AUTO_INVITE_IMPORT_MAX_BYTES / 1024)} KB.`);
+    }
+
+    const response = await fetch(attachment.url);
+
+    if (!response.ok) {
+        throw new Error(`Could not download attachment. Discord returned ${response.status}.`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    if (buffer.length > VRCHAT_AUTO_INVITE_IMPORT_MAX_BYTES) {
+        throw new Error(`Attachment is too large. Max size is ${Math.ceil(VRCHAT_AUTO_INVITE_IMPORT_MAX_BYTES / 1024)} KB.`);
+    }
+
+    return decodeVrchatAutoInviteImportBuffer(buffer);
+
 }
 
 function getVrchatAutoInviteDisplayName(user, fallback = 'Unknown VRChat user') {
@@ -14483,6 +14624,7 @@ function getVrchatAutoInviteUsage() {
         '`!autoinvite off`',
         '`!autoinvite status`',
         '`!autoinvite run`',
+        '`!autoinvite import` with a .txt attachment or pasted VRChat user IDs',
         '`!autoinvite force on/off`',
         '`!autoinvite myinstance on/off`',
         '`!autoinvite cooldown <hours>`',
@@ -14629,6 +14771,120 @@ async function handleVrchatAutoInviteCommand(message, args) {
 
         await statusMessage.edit(truncateText(scanResponse, 1900)).catch(() => {});
 
+        return;
+
+    }
+
+    if (
+        subcommand === 'import' ||
+        subcommand === 'file' ||
+        subcommand === 'bulk' ||
+        subcommand === 'invitefile' ||
+        subcommand === 'list'
+    ) {
+
+        const missingSettings = getVrchatAutoInviteMissingSettings();
+
+        if (missingSettings.length) {
+            return message.reply(`Auto-invite import cannot run yet. Missing: ${missingSettings.join(', ')}.`);
+        }
+
+        const attachment = message.attachments?.first?.() || null;
+        const pastedText = args.join(' ');
+        let sourceText = pastedText;
+
+        if (attachment) {
+            try {
+                sourceText = `${sourceText}\n${await readVrchatAutoInviteImportAttachment(attachment)}`;
+            } catch (error) {
+                return message.reply(`Could not read the attached invite list: ${truncateText(error.message, 500)}`);
+            }
+        }
+
+        const userIds = extractVrchatAutoInviteUserIdsFromText(sourceText);
+
+        if (!userIds.length) {
+            return message.reply(
+                'I could not find any VRChat user IDs. Attach a `.txt` file or paste IDs like `usr_00000000-0000-0000-0000-000000000000`.'
+            );
+        }
+
+        const statusMessage = await message.reply(
+            `Found ${userIds.length} unique VRChat user ID(s). Checking and queueing invites...`
+        );
+        const importSource = attachment
+            ? `manual-import:${truncateText(attachment.name || 'attachment', 80)}`
+            : 'manual-import:pasted';
+        const summary = {
+            queued: 0,
+            skipped: 0,
+            alreadyQueued: 0,
+            failed: 0
+        };
+        const failedSamples = [];
+        const skippedSamples = [];
+        let stoppedReason = null;
+
+        await refreshVrchatAutoInvitePendingCache(false).catch(error => {
+            console.warn('Failed to refresh pending auto-invites before import:', error.message);
+        });
+
+        for (const [index, userId] of userIds.entries()) {
+            try {
+                const outcome = await evaluateVrchatAutoInviteCandidate({
+                    userId,
+                    displayName: userId,
+                    instanceId: importSource,
+                    worldName: null,
+                    seenAt: new Date().toISOString()
+                }, {
+                    manual: true
+                });
+
+                if (outcome === 'queued') summary.queued++;
+                if (outcome === 'already-queued') summary.alreadyQueued++;
+                if (outcome === 'skipped') {
+                    summary.skipped++;
+                    if (skippedSamples.length < 5) skippedSamples.push(userId);
+                }
+            } catch (error) {
+                summary.failed++;
+                if (failedSamples.length < 5) {
+                    failedSamples.push(`${userId}: ${truncateText(error.message || String(error), 160)}`);
+                }
+                if (isVrchatRateLimitError(error)) {
+                    stoppedReason = error.message;
+                    break;
+                }
+            }
+
+            if ((index + 1) % 10 === 0 || index === userIds.length - 1) {
+                await statusMessage.edit(
+                    `Import progress: ${index + 1}/${userIds.length} checked. Queued ${summary.queued}, skipped ${summary.skipped}, already queued ${summary.alreadyQueued}, failed ${summary.failed}.`
+                ).catch(() => {});
+            }
+        }
+
+        if (summary.queued > 0) {
+            scheduleVrchatAutoInviteQueue(0);
+        }
+
+        const responseLines = [
+            'VRChat auto-invite import finished.',
+            `Found: ${userIds.length}`,
+            `Queued: ${summary.queued}`,
+            `Already queued: ${summary.alreadyQueued}`,
+            `Skipped: ${summary.skipped}`,
+            `Failed: ${summary.failed}`,
+            stoppedReason ? `Stopped early: ${truncateText(stoppedReason, 300)}` : null,
+            skippedSamples.length ? `Sample skipped IDs: ${skippedSamples.map(userId => `\`${userId}\``).join(', ')}` : null,
+            failedSamples.length ? `Sample failures:\n${failedSamples.map(sample => `- ${sample}`).join('\n')}` : null,
+            config.enabled
+                ? 'Queue worker: running now.'
+                : 'Queue worker: paused because auto-invite is off. Run `!autoinvite on` to send queued invites.'
+        ].filter(Boolean).join('\n');
+
+        await statusMessage.edit(truncateText(responseLines, 1900)).catch(() => {});
         return;
 
     }
