@@ -5174,7 +5174,7 @@ function recordInviteJoin(member, usedInvite = null) {
 function formatInviteJoinRecord(record, targetLabel) {
 
     if (!record) {
-        return `No invite record found for ${targetLabel}. I can only look up joins tracked after this feature was added.`;
+        return `No invite record found for ${targetLabel}. I can track future joins, and I can recover older joins only if recent join logs still contain that member's current tag/name.`;
     }
 
     const lines = [
@@ -5187,6 +5187,128 @@ function formatInviteJoinRecord(record, targetLabel) {
     ];
 
     return lines.join('\n');
+
+}
+
+function getInviteLogSearchTerms(targetUser) {
+
+    return [
+        targetUser?.tag,
+        targetUser?.username,
+        targetUser?.globalName,
+        targetUser?.displayName,
+        targetUser?.id
+    ]
+        .map(value => String(value || '').trim().toLowerCase())
+        .filter((value, index, values) => value && values.indexOf(value) === index);
+
+}
+
+function getInviteLogMessageText(logMessage) {
+
+    const parts = [logMessage.content || ''];
+
+    for (const embed of logMessage.embeds?.values?.() || logMessage.embeds || []) {
+        if (embed.title) parts.push(embed.title);
+        if (embed.description) parts.push(embed.description);
+
+        for (const field of embed.fields || []) {
+            if (field.name) parts.push(field.name);
+            if (field.value) parts.push(field.value);
+        }
+    }
+
+    return parts.filter(Boolean).join('\n');
+
+}
+
+function parseInviteJoinRecordFromLogMessage(logMessage, guildId, targetUser) {
+
+    const text = getInviteLogMessageText(logMessage);
+    const normalizedText = text.toLowerCase();
+    const searchTerms = getInviteLogSearchTerms(targetUser);
+
+    if (!searchTerms.some(term => normalizedText.includes(term))) return null;
+    if (!/joined/i.test(text) || !/invite/i.test(text)) return null;
+
+    const mentionInviterMatch = text.match(/(?:from|inviter:\s*)\s*<@!?(\d{17,20})>/i);
+    const plainInviterMatch = text.match(/(?:from|inviter:\s*)\s*([^\n()]+?)\s*\((\d{17,20})\)/i);
+    const inviteCodeMatch =
+        text.match(/invite\s+`([^`]+)`/i) ||
+        text.match(/invite:\s*`?([A-Za-z0-9_-]+)`?/i);
+    const inviterId = mentionInviterMatch?.[1] || plainInviterMatch?.[2] || null;
+    const inviterTag = plainInviterMatch?.[1]?.trim() || null;
+
+    return normalizeInviteJoinRecord({
+        guildId,
+        joinedUserId: targetUser.id,
+        joinedUserTag: targetUser.tag,
+        inviterId,
+        inviterTag,
+        inviteCode: inviteCodeMatch?.[1] || null,
+        joinedAt: logMessage.createdAt?.toISOString?.() || new Date(logMessage.createdTimestamp || Date.now()).toISOString()
+    });
+
+}
+
+async function searchInviteJoinRecordInChannel(channel, guildId, targetUser, maxMessages = 1000) {
+
+    if (!channel?.messages?.fetch) return null;
+
+    let before;
+    let checked = 0;
+
+    while (checked < maxMessages) {
+        const limit = Math.min(100, maxMessages - checked);
+        const fetchedMessages = await channel.messages.fetch({
+            limit,
+            before
+        }).catch(() => null);
+
+        if (!fetchedMessages?.size) break;
+
+        const orderedMessages = [...fetchedMessages.values()]
+            .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+
+        for (const logMessage of orderedMessages) {
+            checked++;
+
+            const record = parseInviteJoinRecordFromLogMessage(logMessage, guildId, targetUser);
+
+            if (record) return record;
+        }
+
+        before = fetchedMessages.last()?.id;
+
+        if (fetchedMessages.size < limit || !before) break;
+    }
+
+    return null;
+
+}
+
+async function findInviteJoinRecordFromLogs(guild, targetUser) {
+
+    if (!guild || !targetUser) return null;
+
+    const channels = [
+        getLogChannel(guild),
+        guild.systemChannel
+    ].filter((channel, index, values) =>
+        channel?.id && values.findIndex(candidate => candidate?.id === channel.id) === index
+    );
+
+    for (const channel of channels) {
+        const record = await searchInviteJoinRecordInChannel(channel, guild.id, targetUser);
+
+        if (!record) continue;
+
+        inviteJoinRecords.set(getInviteJoinKey(record.guildId, record.joinedUserId), record);
+        saveInviteJoinRecords();
+        return record;
+    }
+
+    return null;
 
 }
 
@@ -19131,10 +19253,23 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             return message.reply('Usage: `!whoinvited @member/userID`');
         }
 
-        const record = inviteJoinRecords.get(getInviteJoinKey(message.guild.id, targetUserId));
+        let record = inviteJoinRecords.get(getInviteJoinKey(message.guild.id, targetUserId));
         const targetLabel = targetUser
             ? `${targetUser.tag} (${targetUser.id})`
             : `User ID ${targetUserId}`;
+
+        if (!record && targetUser) {
+            const statusMessage = await message.reply({
+                content: `No saved invite record found for ${targetLabel}. Searching recent join logs...`,
+                allowedMentions: {
+                    parse: []
+                }
+            });
+
+            record = await findInviteJoinRecordFromLogs(message.guild, targetUser);
+
+            await statusMessage.delete().catch(() => {});
+        }
 
         await message.channel.send({
             content: formatInviteJoinRecord(record, targetLabel),
