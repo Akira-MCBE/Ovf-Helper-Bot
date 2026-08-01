@@ -358,6 +358,24 @@ const ENABLE_LAVALINK = process.env.ENABLE_LAVALINK === 'true' ||
     process.env.LAVALINK_ENABLED === 'true';
 const LAVALINK_URL = process.env.LAVALINK_URL || 'lavalinkv4.serenetia.com:443';
 const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || 'https://seretia.link/discord';
+const MUSIC_DEFAULT_SEARCH_PREFIX = (process.env.MUSIC_DEFAULT_SEARCH_PREFIX || 'ytmsearch').trim().replace(/:$/, '').toLowerCase();
+const MUSIC_SEARCH_FALLBACK_PREFIXES = Array.from(new Set(
+    [
+        MUSIC_DEFAULT_SEARCH_PREFIX,
+        ...(process.env.MUSIC_SEARCH_FALLBACK_PREFIXES || 'ytmsearch,ytsearch,scsearch')
+            .split(',')
+            .map(prefix => prefix.trim().replace(/:$/, '').toLowerCase())
+    ].filter(Boolean)
+));
+const MUSIC_DEFAULT_VOLUME = (() => {
+    const configuredVolume = parseInt(process.env.MUSIC_DEFAULT_VOLUME || '35', 10);
+
+    if (Number.isFinite(configuredVolume)) {
+        return Math.min(100, Math.max(1, configuredVolume));
+    }
+
+    return 35;
+})();
 
 // false for normal ports like 2333
 // true for secure/SSL ports like 443
@@ -13413,7 +13431,7 @@ function getMusicQueue(guildId) {
             currentSong: null,
             playing: false,
             stopped: false,
-            volume: 50
+            volume: MUSIC_DEFAULT_VOLUME
         });
 
     }
@@ -13485,32 +13503,56 @@ async function searchLavalink(query, requestedBy) {
 
     const node = getIdealNode();
 
-    let searchQuery = query;
+    const searchQueries = [];
 
     if (!isUrl(query) && !hasSearchPrefix(query)) {
-        searchQuery = `ytsearch:${query}`;
+        for (const prefix of MUSIC_SEARCH_FALLBACK_PREFIXES) {
+            searchQueries.push(`${prefix}:${query}`);
+        }
+    } else {
+        searchQueries.push(query);
     }
 
-    const result = await node.rest.resolve(searchQuery);
+    let lastError = null;
 
-    const { tracks, playlistName } = extractTracks(result);
+    for (const searchQuery of searchQueries) {
 
-    if (!tracks.length) {
-        throw new Error('No tracks found.');
+        try {
+
+            const result = await node.rest.resolve(searchQuery);
+
+            const { tracks, playlistName } = extractTracks(result);
+
+            if (!tracks.length) {
+                continue;
+            }
+
+            const songs = tracks
+                .map(track => makeSong(track, requestedBy))
+                .filter(song => song.encoded);
+
+            if (!songs.length) {
+                continue;
+            }
+
+            return {
+                songs,
+                playlistName
+            };
+
+        } catch (error) {
+
+            lastError = error;
+
+        }
+
     }
 
-    const songs = tracks
-        .map(track => makeSong(track, requestedBy))
-        .filter(song => song.encoded);
-
-    if (!songs.length) {
-        throw new Error('No playable tracks found.');
+    if (lastError) {
+        throw lastError;
     }
 
-    return {
-        songs,
-        playlistName
-    };
+    throw new Error('No playable tracks found.');
 
 }
 
