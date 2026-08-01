@@ -82,6 +82,7 @@ const GIVEAWAYS_FILE = path.join(process.cwd(), 'giveaways.json');
 const POLLS_FILE = path.join(process.cwd(), 'polls.json');
 const XP_FILE = path.join(process.cwd(), 'xp.json');
 const SUGGESTIONS_FILE = path.join(process.cwd(), 'suggestions.json');
+const INVITE_JOIN_RECORDS_FILE = path.join(process.cwd(), 'invite-joins.json');
 const WAIFU_GAME_FILE = path.join(process.cwd(), 'waifu-game.json');
 const WAIFU_IMAGE_DIR = path.join(process.cwd(), 'waifu-images');
 const WAIFU_SOURCE_IMAGE_DIR = process.env.WAIFU_SOURCE_IMAGE_DIR ||
@@ -379,6 +380,7 @@ const LAVALINK_NODES = [
 
 const inviteCache = new Map();
 const inviteStats = new Map();
+const inviteJoinRecords = new Map();
 const musicQueues = new Map();
 
 // Warning system
@@ -669,6 +671,7 @@ client.once('clientReady', async () => {
     loadPolls();
     loadXpRecords();
     loadSuggestions();
+    loadInviteJoinRecords();
     loadWaifuPlayers();
     loadRpgStore();
     loadVrchatSafetyBlacklist();
@@ -4566,7 +4569,8 @@ const GENERIC_SLASH_COMMAND_NAMES = [
     'vrclinked',
     'vrcunverify',
     'vrcverifyconfig',
-    'warn'
+    'warn',
+    'whoinvited'
 ];
 
 const RESTRICTED_SLASH_COMMAND_NAMES = new Set([
@@ -5088,6 +5092,101 @@ function writeJsonObjectFile(filePath, value) {
     } catch (error) {
         console.error(`Failed to write ${filePath}:`, error);
     }
+
+}
+
+function getInviteJoinKey(guildId, userId) {
+    return `${guildId}:${userId}`;
+}
+
+function normalizeInviteJoinRecord(record = {}) {
+
+    const guildId = String(record.guildId || '');
+    const joinedUserId = String(record.joinedUserId || record.userId || '');
+
+    if (!/^\d{17,20}$/.test(guildId) || !/^\d{17,20}$/.test(joinedUserId)) {
+        return null;
+    }
+
+    const inviterId = String(record.inviterId || '');
+
+    return {
+        guildId,
+        joinedUserId,
+        joinedUserTag: String(record.joinedUserTag || record.userTag || joinedUserId),
+        inviterId: /^\d{17,20}$/.test(inviterId) ? inviterId : null,
+        inviterTag: record.inviterTag ? String(record.inviterTag) : null,
+        inviteCode: record.inviteCode ? String(record.inviteCode) : null,
+        joinedAt: record.joinedAt || new Date().toISOString()
+    };
+
+}
+
+function loadInviteJoinRecords() {
+
+    const savedRecords = readJsonObjectFile(INVITE_JOIN_RECORDS_FILE, {});
+    inviteJoinRecords.clear();
+
+    for (const rawRecord of Object.values(savedRecords)) {
+        const record = normalizeInviteJoinRecord(rawRecord);
+
+        if (!record) continue;
+
+        inviteJoinRecords.set(getInviteJoinKey(record.guildId, record.joinedUserId), record);
+    }
+
+    if (inviteJoinRecords.size > 0) {
+        console.log(`Loaded ${inviteJoinRecords.size} invite join record(s).`);
+    }
+
+}
+
+function saveInviteJoinRecords() {
+
+    writeJsonObjectFile(
+        INVITE_JOIN_RECORDS_FILE,
+        Object.fromEntries(inviteJoinRecords.entries())
+    );
+
+}
+
+function recordInviteJoin(member, usedInvite = null) {
+
+    if (!member?.guild?.id || !member?.user?.id) return;
+
+    const record = normalizeInviteJoinRecord({
+        guildId: member.guild.id,
+        joinedUserId: member.user.id,
+        joinedUserTag: member.user.tag,
+        inviterId: usedInvite?.inviter?.id || null,
+        inviterTag: usedInvite?.inviter?.tag || null,
+        inviteCode: usedInvite?.code || null,
+        joinedAt: new Date().toISOString()
+    });
+
+    if (!record) return;
+
+    inviteJoinRecords.set(getInviteJoinKey(record.guildId, record.joinedUserId), record);
+    saveInviteJoinRecords();
+
+}
+
+function formatInviteJoinRecord(record, targetLabel) {
+
+    if (!record) {
+        return `No invite record found for ${targetLabel}. I can only look up joins tracked after this feature was added.`;
+    }
+
+    const lines = [
+        `Invite record for ${targetLabel}:`,
+        record.inviterId
+            ? `Inviter: ${record.inviterTag || 'Unknown user'} (${record.inviterId})`
+            : 'Inviter: Unknown',
+        record.inviteCode ? `Invite code: \`${record.inviteCode}\`` : 'Invite code: Unknown',
+        `Joined at: ${record.joinedAt || 'Unknown'}`
+    ];
+
+    return lines.join('\n');
 
 }
 
@@ -13707,15 +13806,20 @@ client.on('guildMemberAdd', async (member) => {
 
         }
 
+        recordInviteJoin(member, usedInvite);
+
         const channel = member.guild.systemChannel;
 
         if (channel) {
 
             if (usedInvite?.inviter) {
 
-                await channel.send(
-                    `📨 ${member.user.tag} joined using invite \`${usedInvite.code}\` from <@${usedInvite.inviter.id}>`
-                );
+                await channel.send({
+                    content: `📨 ${member.user.tag} joined using invite \`${usedInvite.code}\` from ${usedInvite.inviter.tag} (${usedInvite.inviter.id})`,
+                    allowedMentions: {
+                        parse: []
+                    }
+                });
 
             } else {
 
@@ -13732,7 +13836,7 @@ client.on('guildMemberAdd', async (member) => {
         if (logChannel) {
 
             const inviteText = usedInvite?.inviter
-                ? `\nInvite: \`${usedInvite.code}\`\nInviter: <@${usedInvite.inviter.id}>`
+                ? `\nInvite: \`${usedInvite.code}\`\nInviter: ${usedInvite.inviter.tag} (${usedInvite.inviter.id})`
                 : '';
 
             const embed = new EmbedBuilder()
@@ -13743,7 +13847,10 @@ client.on('guildMemberAdd', async (member) => {
                 .setTimestamp();
 
             logChannel.send({
-                embeds: [embed]
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
             });
 
         }
@@ -13774,8 +13881,11 @@ client.on('guildMemberRemove', async (member) => {
         .setTimestamp();
 
     logChannel.send({
-        embeds: [embed]
-    });
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
 });
 
@@ -13815,8 +13925,11 @@ client.on('messageDelete', async (message) => {
         .setTimestamp();
 
     logChannel.send({
-        embeds: [embed]
-    });
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
 });
 
@@ -13862,8 +13975,11 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
         .setTimestamp();
 
     logChannel.send({
-        embeds: [embed]
-    });
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
 });
 
@@ -13890,8 +14006,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             .setTimestamp();
 
         return logChannel.send({
-            embeds: [embed]
-        });
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
     }
 
@@ -13904,8 +14023,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             .setTimestamp();
 
         return logChannel.send({
-            embeds: [embed]
-        });
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
     }
 
@@ -13922,8 +14044,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             .setTimestamp();
 
         return logChannel.send({
-            embeds: [embed]
-        });
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
     }
 
@@ -17903,6 +18028,7 @@ const HELP_CATEGORIES = [
             '`!invites [@user/userID]` — Show another member\'s tracked invite count.',
             '`!leaderboard` — Show the Discord invite leaderboard.',
             '`!inviteinfo CODE` — Show information about a Discord invite code.',
+            '`!whoinvited @member/userID` — Show who invited a tracked member.',
             '`!event` / `!vrcevent` — Create, list, and manage VRChat community events.',
             '`!rsvp eventId yes/no/maybe` — Respond to a community event.',
             '`!onboarding` / `!welcome-setup [#channel]` — Send the onboarding panel.',
@@ -18996,6 +19122,29 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
         return;
     }
 
+    if (command === '!whoinvited') {
+
+        const targetUser = await resolveUserFromArgs(message, args);
+        const targetUserId = targetUser?.id || getUserIdFromArg(args[0]);
+
+        if (!targetUserId) {
+            return message.reply('Usage: `!whoinvited @member/userID`');
+        }
+
+        const record = inviteJoinRecords.get(getInviteJoinKey(message.guild.id, targetUserId));
+        const targetLabel = targetUser
+            ? `${targetUser.tag} (${targetUser.id})`
+            : `User ID ${targetUserId}`;
+
+        await message.channel.send({
+            content: formatInviteJoinRecord(record, targetLabel),
+            allowedMentions: {
+                parse: []
+            }
+        });
+        return;
+    }
+
 
     // ==========================================
     // FUN PUBLIC COMMANDS
@@ -19385,8 +19534,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
                     .setTimestamp();
 
                 await logChannel.send({
-                    embeds: [embed]
-                });
+                embeds: [embed],
+                allowedMentions: {
+                    parse: []
+                }
+            });
 
             }
 
