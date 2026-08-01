@@ -358,11 +358,11 @@ const ENABLE_LAVALINK = process.env.ENABLE_LAVALINK === 'true' ||
     process.env.LAVALINK_ENABLED === 'true';
 const LAVALINK_URL = process.env.LAVALINK_URL || 'lavalinkv4.serenetia.com:443';
 const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || 'https://seretia.link/discord';
-const MUSIC_DEFAULT_SEARCH_PREFIX = (process.env.MUSIC_DEFAULT_SEARCH_PREFIX || 'ytmsearch').trim().replace(/:$/, '').toLowerCase();
+const MUSIC_DEFAULT_SEARCH_PREFIX = (process.env.MUSIC_DEFAULT_SEARCH_PREFIX || 'ytsearch').trim().replace(/:$/, '').toLowerCase();
 const MUSIC_SEARCH_FALLBACK_PREFIXES = Array.from(new Set(
     [
         MUSIC_DEFAULT_SEARCH_PREFIX,
-        ...(process.env.MUSIC_SEARCH_FALLBACK_PREFIXES || 'ytmsearch,ytsearch,scsearch')
+        ...(process.env.MUSIC_SEARCH_FALLBACK_PREFIXES || 'ytsearch,scsearch,ytmsearch')
             .split(',')
             .map(prefix => prefix.trim().replace(/:$/, '').toLowerCase())
     ].filter(Boolean)
@@ -13499,6 +13499,28 @@ function makeSong(track, requestedBy) {
 
 }
 
+function isLavalinkLoadTracksForbidden(error) {
+
+    return error?.status === 403 && String(error?.path || '').includes('/loadtracks');
+
+}
+
+function createLavalinkSearchError(lastError, failedQueries) {
+
+    if (failedQueries.length && failedQueries.every(failure => isLavalinkLoadTracksForbidden(failure.error))) {
+
+        const error = new Error('Lavalink refused track searches with HTTP 403.');
+        error.userMessage = 'Lavalink connected, but the node refused track searches with `403 /loadtracks`. Use a different Lavalink node/password or enable the music source plugins on that node.';
+        return error;
+
+    }
+
+    if (lastError) return lastError;
+
+    return new Error('No playable tracks found.');
+
+}
+
 async function searchLavalink(query, requestedBy) {
 
     const node = getIdealNode();
@@ -13514,6 +13536,7 @@ async function searchLavalink(query, requestedBy) {
     }
 
     let lastError = null;
+    const failedQueries = [];
 
     for (const searchQuery of searchQueries) {
 
@@ -13543,16 +13566,18 @@ async function searchLavalink(query, requestedBy) {
         } catch (error) {
 
             lastError = error;
+            failedQueries.push({
+                query: searchQuery,
+                error
+            });
+
+            console.warn(`Lavalink search failed for "${searchQuery}": ${error?.status || 'unknown'} ${error?.path || error?.message || 'unknown error'}`);
 
         }
 
     }
 
-    if (lastError) {
-        throw lastError;
-    }
-
-    throw new Error('No playable tracks found.');
+    throw createLavalinkSearchError(lastError, failedQueries);
 
 }
 
@@ -19822,7 +19847,7 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
             console.error('Lavalink play error:', error);
 
             message.reply(
-                '❌ I could not play that. Check your Lavalink host/password, or try `!play scsearch:song name` if your Lavalink supports SoundCloud.'
+                error.userMessage || '❌ I could not play that. Check your Lavalink host/password, or try `!play scsearch:song name` if your Lavalink supports SoundCloud.'
             );
 
         }
