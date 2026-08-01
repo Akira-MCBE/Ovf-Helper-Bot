@@ -20,6 +20,7 @@ const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { Shoukaku, Connectors } = require('shoukaku');
+const { createMusicSystem } = require('./music-system');
 
 const client = new Client({
     intents: [
@@ -353,30 +354,11 @@ const SUDO_USER_ID = '1336490572915015722';
 // LAVALINK CONFIGURATION
 // ==========================================
 
-// Put your real Lavalink info here
 const ENABLE_LAVALINK = process.env.ENABLE_LAVALINK === 'true' ||
     process.env.LAVALINK_ENABLED === 'true';
-const LAVALINK_URL = process.env.LAVALINK_URL || 'lava-v4.millohost.my.id:443';
-const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || 'https://discord.gg/mjS5J2K3ep';
-const MUSIC_DEFAULT_SEARCH_PREFIX = (process.env.MUSIC_DEFAULT_SEARCH_PREFIX || 'ytsearch').trim().replace(/:$/, '').toLowerCase();
-const MUSIC_SEARCH_FALLBACK_PREFIXES = Array.from(new Set(
-    [
-        MUSIC_DEFAULT_SEARCH_PREFIX,
-        ...(process.env.MUSIC_SEARCH_FALLBACK_PREFIXES || 'ytsearch,scsearch,ytmsearch')
-            .split(',')
-            .map(prefix => prefix.trim().replace(/:$/, '').toLowerCase())
-    ].filter(Boolean)
-));
-const MUSIC_DEFAULT_VOLUME = (() => {
-    const configuredVolume = parseInt(process.env.MUSIC_DEFAULT_VOLUME || '35', 10);
-
-    if (Number.isFinite(configuredVolume)) {
-        return Math.min(100, Math.max(1, configuredVolume));
-    }
-
-    return 35;
-})();
-const MUSIC_PREFERRED_LAVALINK_NODE = process.env.MUSIC_PREFERRED_LAVALINK_NODE || 'MilloHost-v4';
+const LAVALINK_URL = process.env.LAVALINK_URL || '';
+const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || '';
+const MUSIC_PREFERRED_LAVALINK_NODE = process.env.MUSIC_PREFERRED_LAVALINK_NODE || '';
 const LAVALINK_UNHEALTHY_NODE_COOLDOWN_MS = Math.max(
     60 * 1000,
     Number.parseInt(process.env.LAVALINK_UNHEALTHY_NODE_COOLDOWN_MS || '600000', 10) || 10 * 60 * 1000
@@ -387,17 +369,6 @@ const LAVALINK_UNHEALTHY_NODE_COOLDOWN_MS = Math.max(
 const LAVALINK_SECURE = process.env.LAVALINK_SECURE
     ? process.env.LAVALINK_SECURE === 'true'
     : true;
-
-const LAVALINK_PUBLIC_FALLBACK_NODES = process.env.DISABLE_PUBLIC_LAVALINK_FALLBACKS === 'true'
-    ? []
-    : [
-        {
-            name: 'MilloHost-v4',
-            url: 'lava-v4.millohost.my.id:443',
-            auth: 'https://discord.gg/mjS5J2K3ep',
-            secure: true
-        }
-    ];
 
 const LAVALINK_EXTRA_NODES = parseLavalinkExtraNodes(
     process.env.LAVALINK_NODES_JSON ||
@@ -413,8 +384,7 @@ const LAVALINK_NODES = buildLavalinkNodes([
         auth: LAVALINK_PASSWORD,
         secure: LAVALINK_SECURE
     },
-    ...LAVALINK_EXTRA_NODES,
-    ...LAVALINK_PUBLIC_FALLBACK_NODES
+    ...LAVALINK_EXTRA_NODES
 ]);
 
 // ==========================================
@@ -424,10 +394,8 @@ const LAVALINK_NODES = buildLavalinkNodes([
 const inviteCache = new Map();
 const inviteStats = new Map();
 const inviteJoinRecords = new Map();
-const musicQueues = new Map();
 const preferredLavalinkNodeNames = new Map();
 const lavalinkNodeHealth = new Map();
-let forcedLavalinkNodeName = null;
 
 // Warning system
 const warningCounts = new Map();
@@ -846,8 +814,7 @@ function resolveLavalinkNode(nodes, connection) {
 
     if (!nodeList.length) return undefined;
 
-    const preferredName = forcedLavalinkNodeName ||
-        (connection?.guildId ? preferredLavalinkNodeNames.get(connection.guildId) : null) ||
+    const preferredName = (connection?.guildId ? preferredLavalinkNodeNames.get(connection.guildId) : null) ||
         (connection?.guild_id ? preferredLavalinkNodeNames.get(connection.guild_id) : null) ||
         MUSIC_PREFERRED_LAVALINK_NODE;
 
@@ -864,7 +831,7 @@ function resolveLavalinkNode(nodes, connection) {
 
 let shoukaku = null;
 
-if (ENABLE_LAVALINK) {
+if (ENABLE_LAVALINK && LAVALINK_NODES.length) {
 
 shoukaku = new Shoukaku(
     new Connectors.DiscordJS(client),
@@ -884,29 +851,68 @@ client.shoukaku = shoukaku;
 shoukaku.on('ready', (name) => {
     markLavalinkNodeHealthy(name);
     console.log(`✅ Lavalink node connected: ${name}`);
+    void musicSystem.handleNodeReady(name).catch(error => {
+        console.error(`Music recovery failed after Lavalink node ${name} connected:`, error);
+    });
 });
 
 shoukaku.on('error', (name, error) => {
     markLavalinkNodeUnhealthy(name, error?.code || error?.message || 'node error');
     console.error(`❌ Lavalink node error on ${name}:`, error);
+    void musicSystem.handleNodeUnavailable(name);
 });
 
 shoukaku.on('close', (name, code, reason) => {
     markLavalinkNodeUnhealthy(name, `closed ${code || ''} ${reason || ''}`.trim());
     console.warn(`⚠️ Lavalink node closed: ${name} | Code: ${code} | Reason: ${reason}`);
+    void musicSystem.handleNodeUnavailable(name);
 });
 
 shoukaku.on('disconnect', (name, count) => {
     markLavalinkNodeUnhealthy(name, `disconnect ${count || 0}`);
     console.warn(`⚠️ Lavalink node disconnected: ${name} | Reconnect count: ${count}`);
+    void musicSystem.handleNodeUnavailable(name);
 });
 
 } else {
 
     client.shoukaku = null;
-    queueStartupLog('info', 'Lavalink music is disabled. Set ENABLE_LAVALINK=true with a working node to enable music commands.');
+    queueStartupLog('info', 'Lavalink music is disabled. Set ENABLE_LAVALINK=true and configure LAVALINK_URL/LAVALINK_PASSWORD or LAVALINK_NODES_JSON.');
 
 }
+
+function getMusicLavalinkNodes(guildId = null) {
+    const nodes = getLavalinkNodesArray(shoukaku?.nodes).filter(isLavalinkNodeUsable);
+    const preferredName = guildId ? preferredLavalinkNodeNames.get(guildId) : MUSIC_PREFERRED_LAVALINK_NODE;
+    return nodes.slice().sort((left, right) => {
+        const leftPreferred = preferredName && getLavalinkNodeName(left) === preferredName ? -1 : 0;
+        const rightPreferred = preferredName && getLavalinkNodeName(right) === preferredName ? -1 : 0;
+        return leftPreferred - rightPreferred || getLavalinkNodePenalty(left) - getLavalinkNodePenalty(right);
+    });
+}
+
+const musicSystem = createMusicSystem({
+    client,
+    enabled: ENABLE_LAVALINK && LAVALINK_NODES.length > 0,
+    getShoukaku: () => shoukaku,
+    getNodes: getMusicLavalinkNodes,
+    getNodeName: getLavalinkNodeName,
+    preferNode: (guildId, nodeName) => {
+        if (guildId && nodeName) preferredLavalinkNodeNames.set(guildId, nodeName);
+    },
+    markNodeUnhealthy: (nodeName, reason) => markLavalinkNodeUnhealthy(nodeName, reason),
+    isTicketChannel: channel => Boolean(getTicketRecordForChannel(channel)),
+    discord: {
+        EmbedBuilder,
+        ActionRowBuilder,
+        ButtonBuilder,
+        ButtonStyle,
+        PermissionsBitField,
+        ChannelType,
+        StringSelectMenuBuilder,
+        StringSelectMenuOptionBuilder
+    }
+});
 
 // Discord.js forwards rejected async event handlers to the client's error
 // event. Always listen for it so one failed command cannot stop the process.
@@ -943,6 +949,7 @@ client.once('clientReady', async () => {
     loadRpgStore();
     loadVrchatSafetyBlacklist();
     loadVrchatSafetyState();
+    musicSystem.load();
 
     client.user.setPresence({
     activities: [
@@ -984,6 +991,8 @@ client.once('clientReady', async () => {
     scheduleTempRoleRemovals();
     scheduleGiveawayEnds();
     startEventReminderWorker();
+
+    await musicSystem.restorePersistentSessions();
 
     if (ENABLE_SLASH_COMMAND_REGISTRATION) {
         registerSlashCommandsForGuilds();
@@ -13332,10 +13341,6 @@ function isTemporaryGeminiError(status, message) {
 
 }
 
-function wait(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 async function callGeminiModel(model, question, username) {
 
     const response = await fetch(
@@ -13613,524 +13618,6 @@ async function fetchRecentMessages(channel, amount, excludeMessageId) {
     return collected
         .slice(0, amount)
         .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-
-}
-
-function formatDuration(ms) {
-
-    if (!ms || isNaN(ms)) return 'Unknown';
-
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-
-    if (hours > 0) {
-        return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-    }
-
-    return `${minutes}:${String(seconds).padStart(2, '0')}`;
-
-}
-
-function isUrl(text) {
-    return /^https?:\/\//i.test(text);
-}
-
-function hasSearchPrefix(text) {
-
-    const lower = text.toLowerCase();
-
-    return (
-        lower.startsWith('ytsearch:') ||
-        lower.startsWith('ytmsearch:') ||
-        lower.startsWith('scsearch:') ||
-        lower.startsWith('spsearch:') ||
-        lower.startsWith('dzsearch:') ||
-        lower.startsWith('amsearch:')
-    );
-
-}
-
-function getIdealNode() {
-
-    if (!ENABLE_LAVALINK || !shoukaku) {
-        throw new Error('Music is disabled. Set ENABLE_LAVALINK=true and configure a working Lavalink node to use music commands.');
-    }
-
-    const node = resolveLavalinkNode(shoukaku.nodes);
-
-    if (!node) {
-        throw new Error('No Lavalink node is currently connected.');
-    }
-
-    return node;
-
-}
-
-function getLavalinkSearchNodes(guildId = null) {
-
-    if (!ENABLE_LAVALINK || !shoukaku) {
-        throw new Error('Music is disabled. Set ENABLE_LAVALINK=true and configure a working Lavalink node to use music commands.');
-    }
-
-    const queue = guildId ? musicQueues.get(guildId) : null;
-    const currentNodeName = getLavalinkNodeName(queue?.player?.node);
-    const preferredNodeName = guildId ? preferredLavalinkNodeNames.get(guildId) : null;
-    const idealNode = getIdealNode();
-    const allNodes = getLavalinkNodesArray(shoukaku.nodes).filter(isLavalinkNodeUsable);
-    const orderedNodes = [];
-
-    const addNodeByName = (name) => {
-        if (!name) return;
-
-        const node = allNodes.find(candidate => getLavalinkNodeName(candidate) === name);
-
-        if (node && !orderedNodes.includes(node)) {
-            orderedNodes.push(node);
-        }
-    };
-
-    addNodeByName(currentNodeName);
-    addNodeByName(preferredNodeName);
-    addNodeByName(MUSIC_PREFERRED_LAVALINK_NODE);
-
-    if (idealNode && isLavalinkNodeUsable(idealNode) && !orderedNodes.includes(idealNode)) {
-        orderedNodes.push(idealNode);
-    }
-
-    for (const node of allNodes) {
-        if (!orderedNodes.includes(node)) {
-            orderedNodes.push(node);
-        }
-    }
-
-    return orderedNodes;
-
-}
-
-function getMusicQueue(guildId) {
-
-    if (!musicQueues.has(guildId)) {
-
-        musicQueues.set(guildId, {
-            player: null,
-            textChannel: null,
-            voiceChannel: null,
-            songs: [],
-            currentSong: null,
-            playing: false,
-            stopped: false,
-            volume: MUSIC_DEFAULT_VOLUME
-        });
-
-    }
-
-    return musicQueues.get(guildId);
-
-}
-
-function extractTracks(result) {
-
-    if (!result) {
-        return {
-            tracks: [],
-            playlistName: null
-        };
-    }
-
-    if (Array.isArray(result.tracks)) {
-        return {
-            tracks: result.tracks,
-            playlistName: result.playlistInfo?.name || null
-        };
-    }
-
-    if (result.loadType === 'track' && result.data) {
-        return {
-            tracks: [result.data],
-            playlistName: null
-        };
-    }
-
-    if (result.loadType === 'playlist' && result.data?.tracks) {
-        return {
-            tracks: result.data.tracks,
-            playlistName: result.data.info?.name || 'Playlist'
-        };
-    }
-
-    if (result.loadType === 'search' && Array.isArray(result.data)) {
-        return {
-            tracks: result.data,
-            playlistName: null
-        };
-    }
-
-    return {
-        tracks: [],
-        playlistName: null
-    };
-
-}
-
-function makeSong(track, requestedBy, nodeName = null) {
-
-    const info = track.info || {};
-
-    return {
-        encoded: track.encoded || track.track,
-        title: info.title || track.title || 'Unknown title',
-        uri: info.uri || info.url || '',
-        author: info.author || 'Unknown artist',
-        length: info.length || info.duration || 0,
-        requestedBy,
-        nodeName
-    };
-
-}
-
-function isLavalinkLoadTracksError(error) {
-
-    return String(error?.path || '').includes('/loadtracks');
-
-}
-
-function createLavalinkSearchError(lastError, failedQueries) {
-
-    const loadTrackFailures = failedQueries.filter(failure => isLavalinkLoadTracksError(failure.error));
-
-    if (loadTrackFailures.length) {
-
-        const details = loadTrackFailures
-            .map(failure => {
-                const source = String(failure.query || '').split(':')[0] || 'source';
-                const nodeName = failure.nodeName ? `${failure.nodeName}/` : '';
-                return `${nodeName}${source} returned ${failure.error?.status || 'an error'}`;
-            })
-            .join(', ');
-
-        const error = new Error(`Lavalink failed track searches: ${details}`);
-        error.userMessage = `Lavalink connected, but its track loader failed (${details}). This is a Lavalink node/source issue. Use a working Lavalink node or fix the node source plugins.`;
-        return error;
-
-    }
-
-    if (lastError) return lastError;
-
-    return new Error('No playable tracks found.');
-
-}
-
-async function searchLavalink(query, requestedBy, guildId = null) {
-
-    const searchQueries = [];
-
-    if (!isUrl(query) && !hasSearchPrefix(query)) {
-        for (const prefix of MUSIC_SEARCH_FALLBACK_PREFIXES) {
-            searchQueries.push(`${prefix}:${query}`);
-        }
-    } else {
-        searchQueries.push(query);
-    }
-
-    let lastError = null;
-    const failedQueries = [];
-    const nodes = getLavalinkSearchNodes(guildId);
-
-    if (!nodes.length) {
-
-        const error = new Error('No healthy Lavalink nodes are connected.');
-        error.userMessage = 'No working Lavalink node is connected right now. Restart the bot or set `LAVALINK_URL` / `LAVALINK_PASSWORD` to a working node.';
-        throw error;
-
-    }
-
-    for (const node of nodes) {
-
-        const nodeName = getLavalinkNodeName(node) || 'Lavalink';
-        const nodeFailures = [];
-
-        for (const searchQuery of searchQueries) {
-
-            try {
-
-                const result = await node.rest.resolve(searchQuery);
-
-                const { tracks, playlistName } = extractTracks(result);
-
-                if (!tracks.length) {
-                    continue;
-                }
-
-                const songs = tracks
-                    .map(track => makeSong(track, requestedBy, nodeName))
-                    .filter(song => song.encoded);
-
-                if (!songs.length) {
-                    continue;
-                }
-
-                if (guildId) {
-                    preferredLavalinkNodeNames.set(guildId, nodeName);
-                }
-
-                return {
-                    songs,
-                    playlistName,
-                    nodeName
-                };
-
-            } catch (error) {
-
-                lastError = error;
-                failedQueries.push({
-                    nodeName,
-                    query: searchQuery,
-                    error
-                });
-                nodeFailures.push({
-                    query: searchQuery,
-                    error
-                });
-
-                console.warn(`Lavalink search failed on ${nodeName} for "${searchQuery}": ${error?.status || 'unknown'} ${error?.path || error?.message || 'unknown error'}`);
-
-            }
-
-        }
-
-        if (nodeFailures.length >= searchQueries.length) {
-            markLavalinkNodeUnhealthy(
-                nodeName,
-                nodeFailures.map(failure => `${failure.error?.status || 'error'} ${failure.error?.path || failure.error?.message || ''}`.trim()).join(', ')
-            );
-        }
-
-    }
-
-    throw createLavalinkSearchError(lastError, failedQueries);
-
-}
-
-function setupPlayerEvents(queue, guildId) {
-
-    if (!queue.player) return;
-
-    queue.player.on('start', () => {
-        queue.playing = true;
-    });
-
-    queue.player.on('end', async (event) => {
-
-        if (event.reason === 'replaced') return;
-
-        if (queue.stopped) {
-            queue.stopped = false;
-            queue.playing = false;
-            queue.currentSong = null;
-            return;
-        }
-
-        queue.playing = false;
-        queue.currentSong = null;
-
-        playNextLavalink(guildId);
-
-    });
-
-    queue.player.on('exception', async (event) => {
-
-        console.error('Lavalink track exception:', event);
-
-        if (queue.textChannel) {
-            queue.textChannel.send('❌ Track failed. Skipping to the next song.').catch(() => {});
-        }
-
-        queue.playing = false;
-        queue.currentSong = null;
-
-        playNextLavalink(guildId);
-
-    });
-
-    queue.player.on('stuck', async (event) => {
-
-        console.error('Lavalink track stuck:', event);
-
-        if (queue.textChannel) {
-            queue.textChannel.send('⚠️ Track got stuck. Skipping to the next song.').catch(() => {});
-        }
-
-        queue.playing = false;
-        queue.currentSong = null;
-
-        playNextLavalink(guildId);
-
-    });
-
-    queue.player.on('closed', async (event) => {
-
-        console.warn('Lavalink voice websocket closed:', event);
-
-        queue.playing = false;
-
-    });
-
-}
-
-async function connectQueueToLavalinkNode(queue, guild, voiceChannel, nodeName = null) {
-
-    const currentNodeName = getLavalinkNodeName(queue.player?.node);
-
-    if (queue.player && (!nodeName || currentNodeName === nodeName)) {
-        return queue.player;
-    }
-
-    if (queue.player) {
-
-        queue.player.removeAllListeners();
-
-        try {
-            await shoukaku.leaveVoiceChannel(guild.id);
-        } catch (error) {
-            console.warn(`Failed to leave old Lavalink node before switching: ${error?.message || error}`);
-        }
-
-        queue.player = null;
-
-    }
-
-    const previousForcedNodeName = forcedLavalinkNodeName;
-
-    if (nodeName) {
-        preferredLavalinkNodeNames.set(guild.id, nodeName);
-        forcedLavalinkNodeName = nodeName;
-    }
-
-    try {
-
-        queue.player = await shoukaku.joinVoiceChannel({
-            guildId: guild.id,
-            channelId: voiceChannel.id,
-            shardId: guild.shardId ?? 0
-        });
-
-    } finally {
-
-        forcedLavalinkNodeName = previousForcedNodeName;
-
-    }
-
-    setupPlayerEvents(queue, guild.id);
-
-    return queue.player;
-
-}
-
-async function ensureLavalinkPlayer(message, voiceChannel, nodeName = null) {
-
-    if (!ENABLE_LAVALINK || !shoukaku) {
-        throw new Error('Music is disabled. Set ENABLE_LAVALINK=true with a working Lavalink node to use music commands.');
-    }
-
-    const queue = getMusicQueue(message.guild.id);
-
-    queue.textChannel = message.channel;
-    queue.voiceChannel = voiceChannel;
-
-    await connectQueueToLavalinkNode(queue, message.guild, voiceChannel, nodeName);
-
-    return queue;
-
-}
-
-async function playNextLavalink(guildId) {
-
-    const queue = musicQueues.get(guildId);
-
-    if (!queue || !queue.player) return;
-
-    const nextSong = queue.songs.shift();
-
-    if (!nextSong) {
-
-        queue.currentSong = null;
-        queue.playing = false;
-
-        if (queue.textChannel) {
-            queue.textChannel.send('✅ Music queue finished.').catch(() => {});
-        }
-
-        return;
-
-    }
-
-    try {
-
-        queue.currentSong = nextSong;
-        queue.playing = true;
-
-        const nextNodeName = nextSong.nodeName || null;
-        const currentNodeName = getLavalinkNodeName(queue.player?.node);
-
-        if (nextNodeName && currentNodeName !== nextNodeName && queue.voiceChannel) {
-            await connectQueueToLavalinkNode(queue, queue.voiceChannel.guild, queue.voiceChannel, nextNodeName);
-        }
-
-        await queue.player.playTrack({
-            track: {
-                encoded: nextSong.encoded
-            }
-        });
-
-        await queue.player.setGlobalVolume(queue.volume);
-
-        if (queue.textChannel) {
-
-            const embed = new EmbedBuilder()
-                .setColor('#1DB954')
-                .setTitle('🎶 Now Playing')
-                .setDescription(nextSong.uri ? `[${nextSong.title}](${nextSong.uri})` : nextSong.title)
-                .addFields(
-                    {
-                        name: 'Artist',
-                        value: `${nextSong.author}`,
-                        inline: true
-                    },
-                    {
-                        name: 'Duration',
-                        value: `${formatDuration(nextSong.length)}`,
-                        inline: true
-                    },
-                    {
-                        name: 'Requested By',
-                        value: `${nextSong.requestedBy}`,
-                        inline: true
-                    }
-                )
-                .setTimestamp();
-
-            queue.textChannel.send({
-                embeds: [embed]
-            }).catch(() => {});
-
-        }
-
-    } catch (error) {
-
-        console.error('Failed to play Lavalink track:', error);
-
-        queue.currentSong = null;
-        queue.playing = false;
-
-        if (queue.textChannel) {
-            queue.textChannel.send('❌ Failed to play that track. Skipping to the next song.').catch(() => {});
-        }
-
-        playNextLavalink(guildId);
-
-    }
 
 }
 
@@ -14555,6 +14042,10 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
 // ==========================================
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
+
+    await musicSystem.handleVoiceStateUpdate(oldState, newState).catch(error => {
+        console.error('Music voice-state handler error:', error);
+    });
 
     const member = newState.member || oldState.member;
 
@@ -18749,17 +18240,20 @@ const HELP_CATEGORIES = [
     {
         title: 'Music',
         emoji: '🎵',
-        description: 'Lavalink voice-channel playback commands. Music must be enabled and the bot must have a working node.',
+        description: 'Persistent Lavalink playback, queue, playlists, DJ controls, filters, and a synchronized button panel.',
         commands: [
-            '`!play song-or-link` — Play a track or add it to the queue.',
-            '`!skip` — Skip the current track.',
-            '`!stop` — Stop playback and clear the music queue.',
-            '`!pause` — Pause the current track.',
-            '`!resume` — Resume paused playback.',
-            '`!queue` — Show the current music queue.',
-            '`!nowplaying` / `!np` — Show the current track.',
-            '`!volume 1-100` — Change the player volume.',
-            '`!leave` — Disconnect the bot from the voice channel.'
+            '`!play` / `!p song-or-link` — Search, play, or queue a track, album, or playlist.',
+            '`!join` / `!leave` / `!dc` — Connect or disconnect the voice player.',
+            '`!pause` / `!resume` / `!stop` / `!skip` / `!previous` — Control playback.',
+            '`!seek` / `!forward` / `!backward duration` — Change playback position.',
+            '`!queue [page]` / `!q` / `!nowplaying` / `!np` — Inspect playback and the queue.',
+            '`!remove` / `!skipto` / `!clearqueue` / `!shuffle` / `!move` — Edit the upcoming queue.',
+            '`!volume amount` / `!loop off|track|queue` / `!autoplay on|off|status` — Change player behavior.',
+            '`!filter preset` / `!filters` / `!equalizer ...` / `!speed rate` — Apply safe audio effects.',
+            '`!lyrics [song]` / `!spotify URL` — Look up lyrics or import Spotify metadata.',
+            '`!playlist ...` / `!serverplaylist ...` — Manage persistent personal or shared playlists.',
+            '`!dj ...` / `!247 ...` / `!musicsettings ...` — Configure permissions and persistence.',
+            '`!musicpanel setup|remove|refresh|status` — Manage the synchronized music panel.'
         ]
     },
     {
@@ -18917,6 +18411,10 @@ async function handleMessageCreate(message) {
     await logCommand(message);
 
     if (await routeRpgCommand(message, command, args)) {
+        return;
+    }
+
+    if (await musicSystem.handlePrefixCommand(message, command, args)) {
         return;
     }
 
@@ -20138,356 +19636,6 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
     }
 
     // ==========================================
-    // LAVALINK MUSIC COMMANDS
-    // ==========================================
-
-    if (command === '!play') {
-
-        const query = args.join(' ');
-
-        if (!query) {
-            return message.reply('⚠️ Usage: `!play song name or link`');
-        }
-
-        const voiceChannel = message.member.voice.channel;
-
-        if (!voiceChannel) {
-            return message.reply('❌ You need to be in a voice channel first.');
-        }
-
-        const permissions = voiceChannel.permissionsFor(message.client.user);
-
-        if (!permissions.has(PermissionsBitField.Flags.Connect) || !permissions.has(PermissionsBitField.Flags.Speak)) {
-            return message.reply('❌ I need permission to join and speak in your voice channel.');
-        }
-
-        try {
-
-            const search = await searchLavalink(query, message.author.toString(), message.guild.id);
-            const existingQueue = musicQueues.get(message.guild.id);
-            const shouldUseSearchNodeNow = !existingQueue?.player ||
-                (!existingQueue.playing && !existingQueue.currentSong);
-
-            const queue = await ensureLavalinkPlayer(
-                message,
-                voiceChannel,
-                shouldUseSearchNodeNow ? search.nodeName : null
-            );
-
-            if (search.playlistName && search.songs.length > 1) {
-
-                queue.songs.push(...search.songs);
-
-                const embed = new EmbedBuilder()
-                    .setColor('#1DB954')
-                    .setTitle('📜 Playlist Added')
-                    .setDescription(`Added **${search.songs.length}** tracks from **${search.playlistName}**.`)
-                    .setTimestamp();
-
-                await message.channel.send({
-                    embeds: [embed]
-                });
-
-            } else {
-
-                const song = search.songs[0];
-
-                queue.songs.push(song);
-
-                const embed = new EmbedBuilder()
-                    .setColor('#1DB954')
-                    .setTitle('🎵 Added to Queue')
-                    .setDescription(song.uri ? `[${song.title}](${song.uri})` : song.title)
-                    .addFields(
-                        {
-                            name: 'Artist',
-                            value: `${song.author}`,
-                            inline: true
-                        },
-                        {
-                            name: 'Duration',
-                            value: `${formatDuration(song.length)}`,
-                            inline: true
-                        },
-                        {
-                            name: 'Position',
-                            value: `${queue.songs.length}`,
-                            inline: true
-                        }
-                    )
-                    .setTimestamp();
-
-                await message.channel.send({
-                    embeds: [embed]
-                });
-
-            }
-
-            if (!queue.playing && !queue.currentSong) {
-                playNextLavalink(message.guild.id);
-            }
-
-        } catch (error) {
-
-            console.error('Lavalink play error:', error);
-
-            message.reply(
-                error.userMessage || '❌ I could not play that. Check your Lavalink host/password, or try `!play scsearch:song name` if your Lavalink supports SoundCloud.'
-            );
-
-        }
-
-        return;
-    }
-
-    if (command === '!skip') {
-
-        const queue = musicQueues.get(message.guild.id);
-
-        if (!queue || !queue.player || !queue.currentSong) {
-            return message.reply('❌ Nothing is currently playing.');
-        }
-
-        try {
-
-            await queue.player.stopTrack();
-
-            await message.channel.send('⏭️ Skipped the current song.');
-
-        } catch (error) {
-
-            console.error(error);
-
-            message.reply('❌ Failed to skip.');
-
-        }
-
-        return;
-    }
-
-    if (command === '!stop') {
-
-        const queue = musicQueues.get(message.guild.id);
-
-        if (!queue || !queue.player) {
-            return message.reply('❌ Nothing is currently playing.');
-        }
-
-        try {
-
-            queue.stopped = true;
-            queue.songs = [];
-            queue.currentSong = null;
-            queue.playing = false;
-
-            await queue.player.stopTrack();
-
-            await message.channel.send('⏹️ Music stopped and queue cleared.');
-
-        } catch (error) {
-
-            console.error(error);
-
-            message.reply('❌ Failed to stop music.');
-
-        }
-
-        return;
-    }
-
-    if (command === '!pause') {
-
-        const queue = musicQueues.get(message.guild.id);
-
-        if (!queue || !queue.player || !queue.currentSong) {
-            return message.reply('❌ Nothing is currently playing.');
-        }
-
-        try {
-
-            await queue.player.setPaused(true);
-
-            await message.channel.send('⏸️ Music paused.');
-
-        } catch (error) {
-
-            console.error(error);
-
-            message.reply('❌ Failed to pause music.');
-
-        }
-
-        return;
-    }
-
-    if (command === '!resume') {
-
-        const queue = musicQueues.get(message.guild.id);
-
-        if (!queue || !queue.player || !queue.currentSong) {
-            return message.reply('❌ Nothing is currently playing.');
-        }
-
-        try {
-
-            await queue.player.setPaused(false);
-
-            await message.channel.send('▶️ Music resumed.');
-
-        } catch (error) {
-
-            console.error(error);
-
-            message.reply('❌ Failed to resume music.');
-
-        }
-
-        return;
-    }
-
-    if (command === '!queue') {
-
-        const queue = musicQueues.get(message.guild.id);
-
-        if (!queue || (!queue.currentSong && queue.songs.length === 0)) {
-            return message.reply('❌ The queue is empty.');
-        }
-
-        const current = queue.currentSong
-            ? `🎶 Now Playing: ${queue.currentSong.uri ? `[${queue.currentSong.title}](${queue.currentSong.uri})` : queue.currentSong.title}`
-            : 'Nothing currently playing.';
-
-        const upcoming = queue.songs.length > 0
-            ? queue.songs
-                .slice(0, 10)
-                .map((song, index) => `${index + 1}. ${song.uri ? `[${song.title}](${song.uri})` : song.title}`)
-                .join('\n')
-            : 'No upcoming songs.';
-
-        const embed = new EmbedBuilder()
-            .setColor('#1DB954')
-            .setTitle('📜 Music Queue')
-            .setDescription(`${current}\n\n**Upcoming:**\n${upcoming}`)
-            .setFooter({
-                text: `Total upcoming songs: ${queue.songs.length}`
-            })
-            .setTimestamp();
-
-        await message.channel.send({
-            embeds: [embed]
-        });
-
-        return;
-    }
-
-    if (command === '!nowplaying' || command === '!np') {
-
-        const queue = musicQueues.get(message.guild.id);
-
-        if (!queue || !queue.currentSong) {
-            return message.reply('❌ Nothing is currently playing.');
-        }
-
-        const song = queue.currentSong;
-
-        const embed = new EmbedBuilder()
-            .setColor('#1DB954')
-            .setTitle('🎶 Now Playing')
-            .setDescription(song.uri ? `[${song.title}](${song.uri})` : song.title)
-            .addFields(
-                {
-                    name: 'Artist',
-                    value: `${song.author}`,
-                    inline: true
-                },
-                {
-                    name: 'Duration',
-                    value: `${formatDuration(song.length)}`,
-                    inline: true
-                },
-                {
-                    name: 'Requested By',
-                    value: `${song.requestedBy}`,
-                    inline: true
-                }
-            )
-            .setTimestamp();
-
-        await message.channel.send({
-            embeds: [embed]
-        });
-
-        return;
-    }
-
-    if (command === '!volume') {
-
-        const queue = musicQueues.get(message.guild.id);
-
-        if (!queue || !queue.player) {
-            return message.reply('❌ Nothing is currently playing.');
-        }
-
-        const volume = parseInt(args[0]);
-
-        if (isNaN(volume) || volume < 1 || volume > 100) {
-            return message.reply('⚠️ Usage: `!volume 1-100`');
-        }
-
-        try {
-
-            queue.volume = volume;
-
-            await queue.player.setGlobalVolume(volume);
-
-            await message.channel.send(`🔊 Volume set to **${volume}%**.`);
-
-        } catch (error) {
-
-            console.error(error);
-
-            message.reply('❌ Failed to change volume.');
-
-        }
-
-        return;
-    }
-
-    if (command === '!leave') {
-
-        if (!ENABLE_LAVALINK || !shoukaku) {
-            return message.reply('Music is disabled. Set `ENABLE_LAVALINK=true` with a working Lavalink node to use music commands.');
-        }
-
-        const queue = musicQueues.get(message.guild.id);
-
-        try {
-
-            if (queue) {
-                queue.stopped = true;
-                queue.songs = [];
-                queue.currentSong = null;
-                queue.playing = false;
-            }
-
-            await shoukaku.leaveVoiceChannel(message.guild.id);
-
-            musicQueues.delete(message.guild.id);
-
-            await message.channel.send('🚪 Left the voice channel.');
-
-        } catch (error) {
-
-            console.error(error);
-
-            message.reply('❌ Failed to leave the voice channel.');
-
-        }
-
-        return;
-    }
-
-    // ==========================================
     // MODERATION COMMANDS
     // ==========================================
 
@@ -21279,6 +20427,11 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
+    if ((interaction.isButton() || interaction.isStringSelectMenu()) && interaction.customId.startsWith('music:')) {
+        await musicSystem.handleInteraction(interaction);
+        return;
+    }
+
     if (!interaction.isButton()) return;
 
     if (interaction.customId.startsWith('help_page:')) {
@@ -21377,4 +20530,32 @@ client.on('interactionCreate', async (interaction) => {
 // LOGIN
 // ==========================================
 
-client.login(TOKEN);
+let gracefulShutdownStarted = false;
+
+async function gracefulShutdown(signal) {
+    if (gracefulShutdownStarted) return;
+    gracefulShutdownStarted = true;
+    console.log(`Received ${signal}; saving music sessions before shutdown.`);
+    await musicSystem.shutdown().catch(error => {
+        console.error('Music shutdown save failed:', error);
+    });
+    client.destroy();
+}
+
+process.once('SIGINT', () => {
+    void gracefulShutdown('SIGINT').finally(() => process.exit(0));
+});
+
+process.once('SIGTERM', () => {
+    void gracefulShutdown('SIGTERM').finally(() => process.exit(0));
+});
+
+process.on('unhandledRejection', error => {
+    console.error('Unhandled promise rejection:', error);
+});
+
+if (require.main === module) {
+    client.login(TOKEN);
+}
+
+module.exports = { client, musicSystem };
