@@ -356,8 +356,8 @@ const SUDO_USER_ID = '1336490572915015722';
 // Put your real Lavalink info here
 const ENABLE_LAVALINK = process.env.ENABLE_LAVALINK === 'true' ||
     process.env.LAVALINK_ENABLED === 'true';
-const LAVALINK_URL = process.env.LAVALINK_URL || 'lavalinkv4.serenetia.com:443';
-const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || 'https://seretia.link/discord';
+const LAVALINK_URL = process.env.LAVALINK_URL || 'lava-v4.millohost.my.id:443';
+const LAVALINK_PASSWORD = process.env.LAVALINK_PASSWORD || 'https://discord.gg/mjS5J2K3ep';
 const MUSIC_DEFAULT_SEARCH_PREFIX = (process.env.MUSIC_DEFAULT_SEARCH_PREFIX || 'ytsearch').trim().replace(/:$/, '').toLowerCase();
 const MUSIC_SEARCH_FALLBACK_PREFIXES = Array.from(new Set(
     [
@@ -376,6 +376,11 @@ const MUSIC_DEFAULT_VOLUME = (() => {
 
     return 35;
 })();
+const MUSIC_PREFERRED_LAVALINK_NODE = process.env.MUSIC_PREFERRED_LAVALINK_NODE || 'MilloHost-v4';
+const LAVALINK_UNHEALTHY_NODE_COOLDOWN_MS = Math.max(
+    60 * 1000,
+    Number.parseInt(process.env.LAVALINK_UNHEALTHY_NODE_COOLDOWN_MS || '600000', 10) || 10 * 60 * 1000
+);
 
 // false for normal ports like 2333
 // true for secure/SSL ports like 443
@@ -387,39 +392,9 @@ const LAVALINK_PUBLIC_FALLBACK_NODES = process.env.DISABLE_PUBLIC_LAVALINK_FALLB
     ? []
     : [
         {
-            name: 'Serenetia-v4',
-            url: 'lavalinkv4.serenetia.com:443',
-            auth: 'https://seretia.link/discord',
-            secure: true
-        },
-        {
-            name: 'Jirayu-v4',
-            url: 'lavalink.jirayu.net:443',
-            auth: 'youshallnotpass',
-            secure: true
-        },
-        {
-            name: 'Trinium-v4',
-            url: 'lavalink-v4.triniumhost.com:443',
-            auth: 'free',
-            secure: true
-        },
-        {
             name: 'MilloHost-v4',
             url: 'lava-v4.millohost.my.id:443',
             auth: 'https://discord.gg/mjS5J2K3ep',
-            secure: true
-        },
-        {
-            name: 'HeavenCloud',
-            url: '89.106.84.59:4000',
-            auth: 'heavencloud.in',
-            secure: false
-        },
-        {
-            name: 'DevamOP',
-            url: 'lavalink.devamop.in:443',
-            auth: 'DevamOP',
             secure: true
         }
     ];
@@ -451,6 +426,7 @@ const inviteStats = new Map();
 const inviteJoinRecords = new Map();
 const musicQueues = new Map();
 const preferredLavalinkNodeNames = new Map();
+const lavalinkNodeHealth = new Map();
 let forcedLavalinkNodeName = null;
 
 // Warning system
@@ -784,6 +760,60 @@ function getLavalinkNodeName(node) {
 
 }
 
+function markLavalinkNodeHealthy(name) {
+
+    if (!name) return;
+
+    lavalinkNodeHealth.set(name, {
+        failures: 0,
+        unhealthyUntil: 0,
+        reason: ''
+    });
+
+}
+
+function markLavalinkNodeUnhealthy(name, reason, cooldownMs = LAVALINK_UNHEALTHY_NODE_COOLDOWN_MS) {
+
+    if (!name) return;
+
+    const current = lavalinkNodeHealth.get(name) || {
+        failures: 0,
+        unhealthyUntil: 0,
+        reason: ''
+    };
+
+    lavalinkNodeHealth.set(name, {
+        failures: current.failures + 1,
+        unhealthyUntil: Date.now() + cooldownMs,
+        reason: String(reason || 'unknown error').slice(0, 160)
+    });
+
+}
+
+function isLavalinkNodeHealthy(name) {
+
+    if (!name) return true;
+
+    const health = lavalinkNodeHealth.get(name);
+
+    return !health?.unhealthyUntil || health.unhealthyUntil <= Date.now();
+
+}
+
+function isLavalinkNodeConnected(node) {
+
+    return node?.state === 1 || node?.ws?.readyState === 1;
+
+}
+
+function isLavalinkNodeUsable(node) {
+
+    const name = getLavalinkNodeName(node);
+
+    return isLavalinkNodeConnected(node) && isLavalinkNodeHealthy(name);
+
+}
+
 function getLavalinkNodesArray(nodes = shoukaku?.nodes) {
 
     if (!nodes) return [];
@@ -809,13 +839,17 @@ function getLavalinkNodePenalty(node) {
 
 function resolveLavalinkNode(nodes, connection) {
 
-    const nodeList = getLavalinkNodesArray(nodes);
+    const allNodes = getLavalinkNodesArray(nodes);
+    const healthyNodes = allNodes.filter(isLavalinkNodeUsable);
+    const connectedNodes = allNodes.filter(isLavalinkNodeConnected);
+    const nodeList = healthyNodes.length ? healthyNodes : connectedNodes;
 
     if (!nodeList.length) return undefined;
 
     const preferredName = forcedLavalinkNodeName ||
         (connection?.guildId ? preferredLavalinkNodeNames.get(connection.guildId) : null) ||
-        (connection?.guild_id ? preferredLavalinkNodeNames.get(connection.guild_id) : null);
+        (connection?.guild_id ? preferredLavalinkNodeNames.get(connection.guild_id) : null) ||
+        MUSIC_PREFERRED_LAVALINK_NODE;
 
     if (preferredName) {
         const preferredNode = nodeList.find(node => getLavalinkNodeName(node) === preferredName);
@@ -848,18 +882,22 @@ shoukaku = new Shoukaku(
 client.shoukaku = shoukaku;
 
 shoukaku.on('ready', (name) => {
+    markLavalinkNodeHealthy(name);
     console.log(`✅ Lavalink node connected: ${name}`);
 });
 
 shoukaku.on('error', (name, error) => {
+    markLavalinkNodeUnhealthy(name, error?.code || error?.message || 'node error');
     console.error(`❌ Lavalink node error on ${name}:`, error);
 });
 
 shoukaku.on('close', (name, code, reason) => {
+    markLavalinkNodeUnhealthy(name, `closed ${code || ''} ${reason || ''}`.trim());
     console.warn(`⚠️ Lavalink node closed: ${name} | Code: ${code} | Reason: ${reason}`);
 });
 
 shoukaku.on('disconnect', (name, count) => {
+    markLavalinkNodeUnhealthy(name, `disconnect ${count || 0}`);
     console.warn(`⚠️ Lavalink node disconnected: ${name} | Reconnect count: ${count}`);
 });
 
@@ -13640,7 +13678,7 @@ function getLavalinkSearchNodes(guildId = null) {
     const currentNodeName = getLavalinkNodeName(queue?.player?.node);
     const preferredNodeName = guildId ? preferredLavalinkNodeNames.get(guildId) : null;
     const idealNode = getIdealNode();
-    const allNodes = getLavalinkNodesArray(shoukaku.nodes);
+    const allNodes = getLavalinkNodesArray(shoukaku.nodes).filter(isLavalinkNodeUsable);
     const orderedNodes = [];
 
     const addNodeByName = (name) => {
@@ -13655,8 +13693,9 @@ function getLavalinkSearchNodes(guildId = null) {
 
     addNodeByName(currentNodeName);
     addNodeByName(preferredNodeName);
+    addNodeByName(MUSIC_PREFERRED_LAVALINK_NODE);
 
-    if (idealNode && !orderedNodes.includes(idealNode)) {
+    if (idealNode && isLavalinkNodeUsable(idealNode) && !orderedNodes.includes(idealNode)) {
         orderedNodes.push(idealNode);
     }
 
@@ -13799,9 +13838,18 @@ async function searchLavalink(query, requestedBy, guildId = null) {
     const failedQueries = [];
     const nodes = getLavalinkSearchNodes(guildId);
 
+    if (!nodes.length) {
+
+        const error = new Error('No healthy Lavalink nodes are connected.');
+        error.userMessage = 'No working Lavalink node is connected right now. Restart the bot or set `LAVALINK_URL` / `LAVALINK_PASSWORD` to a working node.';
+        throw error;
+
+    }
+
     for (const node of nodes) {
 
         const nodeName = getLavalinkNodeName(node) || 'Lavalink';
+        const nodeFailures = [];
 
         for (const searchQuery of searchQueries) {
 
@@ -13841,11 +13889,22 @@ async function searchLavalink(query, requestedBy, guildId = null) {
                     query: searchQuery,
                     error
                 });
+                nodeFailures.push({
+                    query: searchQuery,
+                    error
+                });
 
                 console.warn(`Lavalink search failed on ${nodeName} for "${searchQuery}": ${error?.status || 'unknown'} ${error?.path || error?.message || 'unknown error'}`);
 
             }
 
+        }
+
+        if (nodeFailures.length >= searchQueries.length) {
+            markLavalinkNodeUnhealthy(
+                nodeName,
+                nodeFailures.map(failure => `${failure.error?.status || 'error'} ${failure.error?.path || failure.error?.message || ''}`.trim()).join(', ')
+            );
         }
 
     }
