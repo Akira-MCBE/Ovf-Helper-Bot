@@ -383,14 +383,64 @@ const LAVALINK_SECURE = process.env.LAVALINK_SECURE
     ? process.env.LAVALINK_SECURE === 'true'
     : true;
 
-const LAVALINK_NODES = [
+const LAVALINK_PUBLIC_FALLBACK_NODES = process.env.DISABLE_PUBLIC_LAVALINK_FALLBACKS === 'true'
+    ? []
+    : [
+        {
+            name: 'Serenetia-v4',
+            url: 'lavalinkv4.serenetia.com:443',
+            auth: 'https://seretia.link/discord',
+            secure: true
+        },
+        {
+            name: 'Jirayu-v4',
+            url: 'lavalink.jirayu.net:443',
+            auth: 'youshallnotpass',
+            secure: true
+        },
+        {
+            name: 'Trinium-v4',
+            url: 'lavalink-v4.triniumhost.com:443',
+            auth: 'free',
+            secure: true
+        },
+        {
+            name: 'MilloHost-v4',
+            url: 'lava-v4.millohost.my.id:443',
+            auth: 'https://discord.gg/mjS5J2K3ep',
+            secure: true
+        },
+        {
+            name: 'HeavenCloud',
+            url: '89.106.84.59:4000',
+            auth: 'heavencloud.in',
+            secure: false
+        },
+        {
+            name: 'DevamOP',
+            url: 'lavalink.devamop.in:443',
+            auth: 'DevamOP',
+            secure: true
+        }
+    ];
+
+const LAVALINK_EXTRA_NODES = parseLavalinkExtraNodes(
+    process.env.LAVALINK_NODES_JSON ||
+    process.env.LAVALINK_EXTRA_NODES ||
+    process.env.LAVALINK_NODES ||
+    ''
+);
+
+const LAVALINK_NODES = buildLavalinkNodes([
     {
-        name: 'Main',
+        name: 'Primary',
         url: LAVALINK_URL,
         auth: LAVALINK_PASSWORD,
         secure: LAVALINK_SECURE
-    }
-];
+    },
+    ...LAVALINK_EXTRA_NODES,
+    ...LAVALINK_PUBLIC_FALLBACK_NODES
+]);
 
 // ==========================================
 // INVITE CACHE, STATS, MUSIC QUEUES
@@ -400,6 +450,8 @@ const inviteCache = new Map();
 const inviteStats = new Map();
 const inviteJoinRecords = new Map();
 const musicQueues = new Map();
+const preferredLavalinkNodeNames = new Map();
+let forcedLavalinkNodeName = null;
 
 // Warning system
 const warningCounts = new Map();
@@ -619,6 +671,163 @@ function captureStartupLogs() {
 
 }
 
+function normalizeLavalinkNodeUrl(url) {
+
+    return String(url || '')
+        .trim()
+        .replace(/^https?:\/\//i, '')
+        .replace(/\/+$/, '');
+
+}
+
+function parseLavalinkSecure(value, fallback = true) {
+
+    if (typeof value === 'boolean') return value;
+    if (value == null || value === '') return fallback;
+
+    return ['true', '1', 'yes', 'y', 'secure', 'ssl'].includes(String(value).trim().toLowerCase());
+
+}
+
+function normalizeLavalinkNodeConfig(node, index = 0) {
+
+    if (!node || typeof node !== 'object') return null;
+
+    const url = normalizeLavalinkNodeUrl(node.url || node.host);
+    const auth = String(node.auth || node.password || '').trim();
+
+    if (!url || !auth) return null;
+
+    return {
+        name: String(node.name || `Lavalink-${index + 1}`).trim() || `Lavalink-${index + 1}`,
+        url,
+        auth,
+        secure: parseLavalinkSecure(node.secure, true)
+    };
+
+}
+
+function parseLavalinkExtraNodes(value) {
+
+    const raw = String(value || '').trim();
+
+    if (!raw) return [];
+
+    try {
+
+        const parsed = JSON.parse(raw);
+        const nodes = Array.isArray(parsed) ? parsed : [parsed];
+
+        return nodes
+            .map((node, index) => normalizeLavalinkNodeConfig(node, index))
+            .filter(Boolean);
+
+    } catch {
+
+        return raw
+            .split(';')
+            .map((entry, index) => {
+                const [name, url, auth, secure] = entry.split('|').map(part => part?.trim());
+                return normalizeLavalinkNodeConfig({
+                    name,
+                    url,
+                    auth,
+                    secure
+                }, index);
+            })
+            .filter(Boolean);
+
+    }
+
+}
+
+function buildLavalinkNodes(nodes) {
+
+    const usedKeys = new Set();
+    const usedNames = new Set();
+    const builtNodes = [];
+
+    for (const node of nodes) {
+
+        const normalized = normalizeLavalinkNodeConfig(node, builtNodes.length);
+
+        if (!normalized) continue;
+
+        const key = `${normalized.url}|${normalized.auth}|${normalized.secure}`;
+
+        if (usedKeys.has(key)) continue;
+
+        let name = normalized.name;
+        let suffix = 2;
+
+        while (usedNames.has(name)) {
+            name = `${normalized.name}-${suffix}`;
+            suffix += 1;
+        }
+
+        usedKeys.add(key);
+        usedNames.add(name);
+        builtNodes.push({
+            ...normalized,
+            name
+        });
+
+    }
+
+    return builtNodes;
+
+}
+
+function getLavalinkNodeName(node) {
+
+    return node?.name || node?.options?.name || node?.option?.name || null;
+
+}
+
+function getLavalinkNodesArray(nodes = shoukaku?.nodes) {
+
+    if (!nodes) return [];
+    if (Array.isArray(nodes)) return nodes.filter(Boolean);
+    if (typeof nodes.values === 'function') return Array.from(nodes.values()).filter(Boolean);
+
+    return Object.values(nodes).filter(Boolean);
+
+}
+
+function getLavalinkNodePenalty(node) {
+
+    const stats = node?.stats || {};
+    const players = Number(stats.players || 0);
+    const playingPlayers = Number(stats.playingPlayers || 0);
+    const frameStats = stats.frameStats || {};
+    const deficit = Number(frameStats.deficit || 0);
+    const nulled = Number(frameStats.nulled || 0);
+
+    return players + playingPlayers + deficit + nulled;
+
+}
+
+function resolveLavalinkNode(nodes, connection) {
+
+    const nodeList = getLavalinkNodesArray(nodes);
+
+    if (!nodeList.length) return undefined;
+
+    const preferredName = forcedLavalinkNodeName ||
+        (connection?.guildId ? preferredLavalinkNodeNames.get(connection.guildId) : null) ||
+        (connection?.guild_id ? preferredLavalinkNodeNames.get(connection.guild_id) : null);
+
+    if (preferredName) {
+        const preferredNode = nodeList.find(node => getLavalinkNodeName(node) === preferredName);
+        if (preferredNode) return preferredNode;
+    }
+
+    return nodeList
+        .slice()
+        .sort((left, right) => getLavalinkNodePenalty(left) - getLavalinkNodePenalty(right))[0];
+
+}
+
 let shoukaku = null;
 
 if (ENABLE_LAVALINK) {
@@ -630,7 +839,9 @@ shoukaku = new Shoukaku(
         moveOnDisconnect: true,
         resumable: false,
         reconnectTries: 3,
-        reconnectInterval: 10
+        reconnectInterval: 10,
+        restTimeout: 20,
+        nodeResolver: resolveLavalinkNode
     }
 );
 
@@ -13409,13 +13620,53 @@ function getIdealNode() {
         throw new Error('Music is disabled. Set ENABLE_LAVALINK=true and configure a working Lavalink node to use music commands.');
     }
 
-    const node = shoukaku.options.nodeResolver(shoukaku.nodes);
+    const node = resolveLavalinkNode(shoukaku.nodes);
 
     if (!node) {
         throw new Error('No Lavalink node is currently connected.');
     }
 
     return node;
+
+}
+
+function getLavalinkSearchNodes(guildId = null) {
+
+    if (!ENABLE_LAVALINK || !shoukaku) {
+        throw new Error('Music is disabled. Set ENABLE_LAVALINK=true and configure a working Lavalink node to use music commands.');
+    }
+
+    const queue = guildId ? musicQueues.get(guildId) : null;
+    const currentNodeName = getLavalinkNodeName(queue?.player?.node);
+    const preferredNodeName = guildId ? preferredLavalinkNodeNames.get(guildId) : null;
+    const idealNode = getIdealNode();
+    const allNodes = getLavalinkNodesArray(shoukaku.nodes);
+    const orderedNodes = [];
+
+    const addNodeByName = (name) => {
+        if (!name) return;
+
+        const node = allNodes.find(candidate => getLavalinkNodeName(candidate) === name);
+
+        if (node && !orderedNodes.includes(node)) {
+            orderedNodes.push(node);
+        }
+    };
+
+    addNodeByName(currentNodeName);
+    addNodeByName(preferredNodeName);
+
+    if (idealNode && !orderedNodes.includes(idealNode)) {
+        orderedNodes.push(idealNode);
+    }
+
+    for (const node of allNodes) {
+        if (!orderedNodes.includes(node)) {
+            orderedNodes.push(node);
+        }
+    }
+
+    return orderedNodes;
 
 }
 
@@ -13484,7 +13735,7 @@ function extractTracks(result) {
 
 }
 
-function makeSong(track, requestedBy) {
+function makeSong(track, requestedBy, nodeName = null) {
 
     const info = track.info || {};
 
@@ -13494,23 +13745,34 @@ function makeSong(track, requestedBy) {
         uri: info.uri || info.url || '',
         author: info.author || 'Unknown artist',
         length: info.length || info.duration || 0,
-        requestedBy
+        requestedBy,
+        nodeName
     };
 
 }
 
-function isLavalinkLoadTracksForbidden(error) {
+function isLavalinkLoadTracksError(error) {
 
-    return error?.status === 403 && String(error?.path || '').includes('/loadtracks');
+    return String(error?.path || '').includes('/loadtracks');
 
 }
 
 function createLavalinkSearchError(lastError, failedQueries) {
 
-    if (failedQueries.length && failedQueries.every(failure => isLavalinkLoadTracksForbidden(failure.error))) {
+    const loadTrackFailures = failedQueries.filter(failure => isLavalinkLoadTracksError(failure.error));
 
-        const error = new Error('Lavalink refused track searches with HTTP 403.');
-        error.userMessage = 'Lavalink connected, but the node refused track searches with `403 /loadtracks`. Use a different Lavalink node/password or enable the music source plugins on that node.';
+    if (loadTrackFailures.length) {
+
+        const details = loadTrackFailures
+            .map(failure => {
+                const source = String(failure.query || '').split(':')[0] || 'source';
+                const nodeName = failure.nodeName ? `${failure.nodeName}/` : '';
+                return `${nodeName}${source} returned ${failure.error?.status || 'an error'}`;
+            })
+            .join(', ');
+
+        const error = new Error(`Lavalink failed track searches: ${details}`);
+        error.userMessage = `Lavalink connected, but its track loader failed (${details}). This is a Lavalink node/source issue. Use a working Lavalink node or fix the node source plugins.`;
         return error;
 
     }
@@ -13521,9 +13783,7 @@ function createLavalinkSearchError(lastError, failedQueries) {
 
 }
 
-async function searchLavalink(query, requestedBy) {
-
-    const node = getIdealNode();
+async function searchLavalink(query, requestedBy, guildId = null) {
 
     const searchQueries = [];
 
@@ -13537,41 +13797,54 @@ async function searchLavalink(query, requestedBy) {
 
     let lastError = null;
     const failedQueries = [];
+    const nodes = getLavalinkSearchNodes(guildId);
 
-    for (const searchQuery of searchQueries) {
+    for (const node of nodes) {
 
-        try {
+        const nodeName = getLavalinkNodeName(node) || 'Lavalink';
 
-            const result = await node.rest.resolve(searchQuery);
+        for (const searchQuery of searchQueries) {
 
-            const { tracks, playlistName } = extractTracks(result);
+            try {
 
-            if (!tracks.length) {
-                continue;
+                const result = await node.rest.resolve(searchQuery);
+
+                const { tracks, playlistName } = extractTracks(result);
+
+                if (!tracks.length) {
+                    continue;
+                }
+
+                const songs = tracks
+                    .map(track => makeSong(track, requestedBy, nodeName))
+                    .filter(song => song.encoded);
+
+                if (!songs.length) {
+                    continue;
+                }
+
+                if (guildId) {
+                    preferredLavalinkNodeNames.set(guildId, nodeName);
+                }
+
+                return {
+                    songs,
+                    playlistName,
+                    nodeName
+                };
+
+            } catch (error) {
+
+                lastError = error;
+                failedQueries.push({
+                    nodeName,
+                    query: searchQuery,
+                    error
+                });
+
+                console.warn(`Lavalink search failed on ${nodeName} for "${searchQuery}": ${error?.status || 'unknown'} ${error?.path || error?.message || 'unknown error'}`);
+
             }
-
-            const songs = tracks
-                .map(track => makeSong(track, requestedBy))
-                .filter(song => song.encoded);
-
-            if (!songs.length) {
-                continue;
-            }
-
-            return {
-                songs,
-                playlistName
-            };
-
-        } catch (error) {
-
-            lastError = error;
-            failedQueries.push({
-                query: searchQuery,
-                error
-            });
-
-            console.warn(`Lavalink search failed for "${searchQuery}": ${error?.status || 'unknown'} ${error?.path || error?.message || 'unknown error'}`);
 
         }
 
@@ -13647,7 +13920,56 @@ function setupPlayerEvents(queue, guildId) {
 
 }
 
-async function ensureLavalinkPlayer(message, voiceChannel) {
+async function connectQueueToLavalinkNode(queue, guild, voiceChannel, nodeName = null) {
+
+    const currentNodeName = getLavalinkNodeName(queue.player?.node);
+
+    if (queue.player && (!nodeName || currentNodeName === nodeName)) {
+        return queue.player;
+    }
+
+    if (queue.player) {
+
+        queue.player.removeAllListeners();
+
+        try {
+            await shoukaku.leaveVoiceChannel(guild.id);
+        } catch (error) {
+            console.warn(`Failed to leave old Lavalink node before switching: ${error?.message || error}`);
+        }
+
+        queue.player = null;
+
+    }
+
+    const previousForcedNodeName = forcedLavalinkNodeName;
+
+    if (nodeName) {
+        preferredLavalinkNodeNames.set(guild.id, nodeName);
+        forcedLavalinkNodeName = nodeName;
+    }
+
+    try {
+
+        queue.player = await shoukaku.joinVoiceChannel({
+            guildId: guild.id,
+            channelId: voiceChannel.id,
+            shardId: guild.shardId ?? 0
+        });
+
+    } finally {
+
+        forcedLavalinkNodeName = previousForcedNodeName;
+
+    }
+
+    setupPlayerEvents(queue, guild.id);
+
+    return queue.player;
+
+}
+
+async function ensureLavalinkPlayer(message, voiceChannel, nodeName = null) {
 
     if (!ENABLE_LAVALINK || !shoukaku) {
         throw new Error('Music is disabled. Set ENABLE_LAVALINK=true with a working Lavalink node to use music commands.');
@@ -13658,17 +13980,7 @@ async function ensureLavalinkPlayer(message, voiceChannel) {
     queue.textChannel = message.channel;
     queue.voiceChannel = voiceChannel;
 
-    if (!queue.player) {
-
-        queue.player = await shoukaku.joinVoiceChannel({
-            guildId: message.guild.id,
-            channelId: voiceChannel.id,
-            shardId: message.guild.shardId ?? 0
-        });
-
-        setupPlayerEvents(queue, message.guild.id);
-
-    }
+    await connectQueueToLavalinkNode(queue, message.guild, voiceChannel, nodeName);
 
     return queue;
 
@@ -13699,6 +14011,13 @@ async function playNextLavalink(guildId) {
 
         queue.currentSong = nextSong;
         queue.playing = true;
+
+        const nextNodeName = nextSong.nodeName || null;
+        const currentNodeName = getLavalinkNodeName(queue.player?.node);
+
+        if (nextNodeName && currentNodeName !== nextNodeName && queue.voiceChannel) {
+            await connectQueueToLavalinkNode(queue, queue.voiceChannel.guild, queue.voiceChannel, nextNodeName);
+        }
 
         await queue.player.playTrack({
             track: {
@@ -19785,9 +20104,16 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
         try {
 
-            const queue = await ensureLavalinkPlayer(message, voiceChannel);
+            const search = await searchLavalink(query, message.author.toString(), message.guild.id);
+            const existingQueue = musicQueues.get(message.guild.id);
+            const shouldUseSearchNodeNow = !existingQueue?.player ||
+                (!existingQueue.playing && !existingQueue.currentSong);
 
-            const search = await searchLavalink(query, message.author.toString());
+            const queue = await ensureLavalinkPlayer(
+                message,
+                voiceChannel,
+                shouldUseSearchNodeNow ? search.nodeName : null
+            );
 
             if (search.playlistName && search.songs.length > 1) {
 
