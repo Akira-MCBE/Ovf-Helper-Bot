@@ -838,7 +838,7 @@ shoukaku = new Shoukaku(
     new Connectors.DiscordJS(client),
     LAVALINK_NODES,
     {
-        moveOnDisconnect: true,
+        moveOnDisconnect: false,
         resumable: false,
         reconnectTries: 3,
         reconnectInterval: 10,
