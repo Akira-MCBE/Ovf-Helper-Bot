@@ -355,6 +355,7 @@ class GuildMusicQueue {
         this.nodeName = options.nodeName || null;
         this.voiceState = 'disconnected';
         this.recoveryState = 'idle';
+        this.recoveryToken = 0;
         this.playing = false;
         this.stopped = false;
         this.destroyed = false;
@@ -896,13 +897,13 @@ class MusicSystem {
         };
     }
 
-    async connect(queue, guild, voiceChannel, nodeName = null) {
+    async connect(queue, guild, voiceChannel, nodeName = null, options = {}) {
         const shoukaku = this.getShoukaku();
         if (!this.enabled || !shoukaku) throw this.userError('Music is disabled or Lavalink is not configured.');
         if (!voiceChannel) throw this.userError('Join a voice channel first.');
 
         const currentNodeName = queue.player ? this.nodeName(queue.player.node) : null;
-        if (queue.player && queue.voiceChannelId === voiceChannel.id && (!nodeName || currentNodeName === nodeName)) {
+        if (!options.force && queue.player && queue.voiceChannelId === voiceChannel.id && (!nodeName || currentNodeName === nodeName)) {
             return queue.player;
         }
 
@@ -981,17 +982,19 @@ class MusicSystem {
 
         player.on('end', event => {
             if (!valid() || !eventMatchesCurrent(event) || String(event?.reason || '').toLowerCase() === 'replaced') return;
+            const currentTrackId = queue.currentTrack?.id;
             void this.serialize(queue.guildId, async () => {
-                if (!valid()) return;
+                if (!valid() || queue.currentTrack?.id !== currentTrackId || !eventMatchesCurrent(event)) return;
                 await this.finishTrack(queue, queue.pendingEndAction || 'completed');
             }).catch(error => console.error('Track-end handling failed:', error));
         });
 
         player.on('exception', event => {
             if (!valid() || !eventMatchesCurrent(event)) return;
+            const currentTrackId = queue.currentTrack?.id;
             console.error(`Track exception in guild ${queue.guildId}:`, event);
             void this.serialize(queue.guildId, async () => {
-                if (!valid()) return;
+                if (!valid() || queue.currentTrack?.id !== currentTrackId || !eventMatchesCurrent(event)) return;
                 this.metrics.playbackFailures += 1;
                 await this.recoverBrokenTrack(queue, 'failed');
             }).catch(error => console.error('Track-exception recovery failed:', error));
@@ -999,9 +1002,10 @@ class MusicSystem {
 
         player.on('stuck', event => {
             if (!valid() || !eventMatchesCurrent(event)) return;
+            const currentTrackId = queue.currentTrack?.id;
             console.error(`Track stuck in guild ${queue.guildId}:`, event);
             void this.serialize(queue.guildId, async () => {
-                if (!valid()) return;
+                if (!valid() || queue.currentTrack?.id !== currentTrackId || !eventMatchesCurrent(event)) return;
                 this.metrics.stuckTracks += 1;
                 await this.recoverBrokenTrack(queue, 'stuck');
             }).catch(error => console.error('Track-stuck recovery failed:', error));
@@ -1086,7 +1090,7 @@ class MusicSystem {
         await this.finishTrack(queue, reason);
     }
 
-    async playTrack(queue, track, resumePosition = 0) {
+    async playTrack(queue, track, resumePosition = 0, options = {}) {
         if (!queue.player) throw this.userError('The voice player is not connected.');
         let playable = track;
         const currentNodeName = this.nodeName(queue.player.node);
@@ -1108,8 +1112,8 @@ class MusicSystem {
         if (queue.paused) await queue.player.setPaused(true);
         queue.playbackStartedAt = Date.now();
         this.scheduleTrackWatchdog(queue, queue.player, queue.playerGeneration);
-        this.recordUsage(queue, playable);
-        if (this.getSettings(queue.guildId).announce) await this.announceNowPlaying(queue);
+        if (options.recordUsage !== false) this.recordUsage(queue, playable);
+        if (options.announce !== false && this.getSettings(queue.guildId).announce) await this.announceNowPlaying(queue);
         this.schedulePanelUpdate(queue);
         this.persistSession(queue);
     }
@@ -2625,6 +2629,8 @@ class MusicSystem {
     async recoverSession(guildId) {
         const saved = this.repository.data.sessions[guildId];
         if (!saved?.enabled247 || !saved.voiceChannelId) return;
+        const activeQueue = this.players.get(guildId);
+        if (activeQueue?.player && !activeQueue.destroyed) return;
         const attempts = this.restoreAttempts.get(guildId) || 0;
         if (attempts >= 3) {
             await this.notifyPermanentRestoreFailure(guildId, saved);
@@ -2641,6 +2647,8 @@ class MusicSystem {
         }
 
         await this.serialize(guildId, async () => {
+            const connectedQueue = this.players.get(guildId);
+            if (connectedQueue?.player && !connectedQueue.destroyed) return;
             const queue = new GuildMusicQueue(guildId, this.getSettings(guildId), saved);
             queue.recoveryState = 'restoring';
             this.players.set(guildId, queue);
@@ -2656,7 +2664,7 @@ class MusicSystem {
             queue.recoveryState = 'restored';
             if (queue.upcoming.length) {
                 const first = queue.upcoming.shift();
-                await this.playTrack(queue, first, position);
+                await this.playTrack(queue, first, position, { announce: false, recordUsage: false });
             }
             this.restoreAttempts.delete(guildId);
             this.metrics.nodeRecoveries += 1;
@@ -2682,7 +2690,11 @@ class MusicSystem {
         this.metrics.nodeRecoveries += 1;
         for (const queue of this.players.values()) {
             if (queue.recoveryState === 'waiting-for-node') {
-                await this.recoverActivePlayer(queue).catch(error => {
+                const timer = this.failoverTimers.get(queue.guildId);
+                if (timer) clearTimeout(timer);
+                this.failoverTimers.delete(queue.guildId);
+                const recoveryToken = queue.recoveryToken;
+                await this.recoverActivePlayer(queue, recoveryToken).catch(error => {
                     console.error(`Active player recovery failed for guild ${queue.guildId}:`, error);
                 });
             }
@@ -2694,13 +2706,15 @@ class MusicSystem {
         for (const queue of this.players.values()) {
             const activeNodeName = queue.player ? this.nodeName(queue.player.node) : queue.nodeName;
             if (activeNodeName !== nodeName) continue;
+            const existingTimer = this.failoverTimers.get(queue.guildId);
+            if (existingTimer) clearTimeout(existingTimer);
+            const recoveryToken = ++queue.recoveryToken;
             queue.recoveryState = 'waiting-for-node';
             queue.position = Number(queue.player?.position || queue.position || 0);
             this.persistSession(queue);
-            if (this.failoverTimers.has(queue.guildId)) continue;
             const timer = setTimeout(() => {
                 this.failoverTimers.delete(queue.guildId);
-                void this.recoverActivePlayer(queue).catch(error => {
+                void this.recoverActivePlayer(queue, recoveryToken).catch(error => {
                     console.error(`Lavalink failover failed for guild ${queue.guildId}:`, error);
                 });
             }, 1500);
@@ -2709,38 +2723,45 @@ class MusicSystem {
         }
     }
 
-    async recoverActivePlayer(queue) {
-        if (!queue || queue.destroyed || !this.players.has(queue.guildId)) return;
+    async recoverActivePlayer(queue, recoveryToken = queue?.recoveryToken) {
+        if (!queue || queue.destroyed || !this.players.has(queue.guildId) || recoveryToken !== queue.recoveryToken) return;
         const nodes = this.availableNodes(queue.guildId);
         if (!nodes.length) {
-            queue.recoveryState = 'waiting-for-node';
+            if (recoveryToken === queue.recoveryToken) queue.recoveryState = 'waiting-for-node';
             return;
         }
         const guild = this.client.guilds.cache.get(queue.guildId) || await this.client.guilds.fetch(queue.guildId).catch(() => null);
         const voiceChannel = guild?.channels.cache.get(queue.voiceChannelId) || await guild?.channels.fetch(queue.voiceChannelId).catch(() => null);
         if (!guild || !voiceChannel?.isVoiceBased()) {
-            queue.recoveryState = 'failed';
+            if (recoveryToken === queue.recoveryToken) queue.recoveryState = 'failed';
             return;
         }
         await this.serialize(queue.guildId, async () => {
+            if (recoveryToken !== queue.recoveryToken || queue.destroyed || this.players.get(queue.guildId) !== queue) return;
+            if (queue.recoveryState === 'recovered' || queue.recoveryState === 'failing-over') return;
             const current = queue.currentTrack;
             const position = Number(queue.player?.position || queue.position || 0);
             const paused = queue.paused;
             queue.recoveryState = 'failing-over';
-            await this.connect(queue, guild, voiceChannel, this.nodeName(nodes[0]));
-            if (current) {
-                queue.paused = paused;
-                await this.playTrack(queue, current, position);
-                if (paused) {
-                    await queue.player.setPaused(true);
-                    queue.paused = true;
+            try {
+                await this.connect(queue, guild, voiceChannel, this.nodeName(nodes[0]), { force: true });
+                if (current) {
+                    queue.paused = paused;
+                    await this.playTrack(queue, current, position, { announce: false, recordUsage: false });
+                    if (paused) {
+                        await queue.player.setPaused(true);
+                        queue.paused = true;
+                    }
+                } else if (queue.upcoming.length) {
+                    await this.playNext(queue);
                 }
-            } else if (queue.upcoming.length) {
-                await this.playNext(queue);
+                queue.recoveryState = 'recovered';
+                this.metrics.nodeRecoveries += 1;
+                this.persistSession(queue);
+            } catch (error) {
+                if (recoveryToken === queue.recoveryToken) queue.recoveryState = 'waiting-for-node';
+                throw error;
             }
-            queue.recoveryState = 'recovered';
-            this.metrics.nodeRecoveries += 1;
-            this.persistSession(queue);
         });
     }
 
