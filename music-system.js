@@ -224,6 +224,18 @@ function hasSearchPrefix(value) {
     return /^(?:yt|ytm|sc|sp|dz|am)search:/i.test(String(value || ''));
 }
 
+function extractEventEncodedTrack(event) {
+    const candidates = [
+        event?.track?.encoded,
+        event?.track?.track,
+        event?.track?.encodedTrack,
+        event?.encoded,
+        event?.encodedTrack,
+        event?.track
+    ];
+    return candidates.find(candidate => typeof candidate === 'string' && candidate.length > 0) || null;
+}
+
 function normalizeTrack(track = {}, requesterId = null, options = {}) {
     const info = track.info || {};
     const pluginInfo = track.pluginInfo || track.plugin || {};
@@ -354,6 +366,9 @@ class GuildMusicQueue {
         this.panelUpdateTimer = null;
         this.panelGeneration = settings.panelGeneration || newId().replace(/-/g, '').slice(0, 12);
         this.lastPanelUpdate = 0;
+        this.trackWatchdogTimer = null;
+        this.playbackToken = 0;
+        this.playbackStartedAt = 0;
     }
 
     add(track) {
@@ -945,7 +960,7 @@ class MusicSystem {
             queue.playerGeneration === generation &&
             !queue.destroyed;
         const eventMatchesCurrent = event => {
-            const eventEncoded = event?.track?.encoded || event?.track;
+            const eventEncoded = extractEventEncodedTrack(event);
             return !eventEncoded || !queue.currentTrack?.encoded || eventEncoded === queue.currentTrack.encoded;
         };
 
@@ -965,7 +980,7 @@ class MusicSystem {
         });
 
         player.on('end', event => {
-            if (!valid() || !eventMatchesCurrent(event) || event?.reason === 'replaced') return;
+            if (!valid() || !eventMatchesCurrent(event) || String(event?.reason || '').toLowerCase() === 'replaced') return;
             void this.serialize(queue.guildId, async () => {
                 if (!valid()) return;
                 await this.finishTrack(queue, queue.pendingEndAction || 'completed');
@@ -999,6 +1014,53 @@ class MusicSystem {
             console.warn(`Music voice connection closed for guild ${queue.guildId}: ${event?.code || 'unknown'}`);
             this.persistSession(queue);
         });
+    }
+
+    clearTrackWatchdog(queue) {
+        if (!queue) return;
+        if (queue.trackWatchdogTimer) clearTimeout(queue.trackWatchdogTimer);
+        queue.trackWatchdogTimer = null;
+    }
+
+    scheduleTrackWatchdog(queue, player, generation, token = null) {
+        this.clearTrackWatchdog(queue);
+        if (!queue.currentTrack || queue.currentTrack.isStream || !queue.currentTrack.duration) return;
+        const playbackToken = token == null ? ++queue.playbackToken : token;
+        const position = Math.max(0, Number(player?.position || queue.position || 0));
+        const remaining = Math.max(0, queue.currentTrack.duration - position);
+        const delay = clamp(remaining + 3000, 3000, 30000);
+        queue.trackWatchdogTimer = setTimeout(() => {
+            queue.trackWatchdogTimer = null;
+            void this.runTrackWatchdog(queue, player, generation, playbackToken).catch(error => {
+                console.error(`Music track watchdog failed for guild ${queue.guildId}:`, error);
+            });
+        }, delay);
+        if (typeof queue.trackWatchdogTimer.unref === 'function') queue.trackWatchdogTimer.unref();
+    }
+
+    async runTrackWatchdog(queue, player, generation, playbackToken) {
+        const valid = this.players.get(queue.guildId) === queue &&
+            queue.player === player &&
+            queue.playerGeneration === generation &&
+            queue.playbackToken === playbackToken &&
+            !queue.destroyed &&
+            Boolean(queue.currentTrack);
+        if (!valid) return;
+        if (queue.paused) {
+            this.scheduleTrackWatchdog(queue, player, generation, playbackToken);
+            return;
+        }
+        const position = Math.max(0, Number(player?.position || queue.position || 0));
+        const duration = Number(queue.currentTrack.duration || 0);
+        if (duration > 0 && position >= Math.max(0, duration - 1000)) {
+            await this.serialize(queue.guildId, async () => {
+                if (queue.player !== player || queue.playerGeneration !== generation || queue.playbackToken !== playbackToken || !queue.currentTrack) return;
+                console.warn(`Lavalink did not emit a usable track-end event for guild ${queue.guildId}; advancing the queue from the playback watchdog.`);
+                await this.finishTrack(queue, queue.pendingEndAction || 'completed');
+            });
+            return;
+        }
+        this.scheduleTrackWatchdog(queue, player, generation, playbackToken);
     }
 
     async recoverBrokenTrack(queue, reason) {
@@ -1041,6 +1103,8 @@ class MusicSystem {
             await queue.player.seekTo(clamp(queue.position, 0, Math.max(0, playable.duration - 1000)));
         }
         if (queue.paused) await queue.player.setPaused(true);
+        queue.playbackStartedAt = Date.now();
+        this.scheduleTrackWatchdog(queue, queue.player, queue.playerGeneration);
         this.recordUsage(queue, playable);
         if (this.getSettings(queue.guildId).announce) await this.announceNowPlaying(queue);
         this.schedulePanelUpdate(queue);
@@ -1077,6 +1141,8 @@ class MusicSystem {
     }
 
     async finishTrack(queue, action) {
+        this.clearTrackWatchdog(queue);
+        queue.playbackToken += 1;
         const finished = queue.currentTrack;
         queue.pendingEndAction = null;
         queue.currentTrack = null;
@@ -2481,6 +2547,8 @@ class MusicSystem {
         if (failoverTimer) clearTimeout(failoverTimer);
         this.failoverTimers.delete(queue.guildId);
         this.cancelIdleTimer(queue);
+        this.clearTrackWatchdog(queue);
+        queue.playbackToken += 1;
         if (queue.panelUpdateTimer) clearTimeout(queue.panelUpdateTimer);
         queue.destroyed = true;
         queue.playerGeneration += 1;
