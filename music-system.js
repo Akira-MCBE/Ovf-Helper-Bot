@@ -1267,13 +1267,14 @@ class MusicSystem {
         return { canonical, args: rewrittenArgs };
     }
 
-    async handlePrefixCommand(message, rawCommand, rawArgs) {
+    async handlePrefixCommand(message, rawCommand, rawArgs, options = {}) {
         if (!rawCommand) return false;
         const normalized = this.normalizeCommand(rawCommand, rawArgs || []);
         const command = normalized.canonical;
         const args = normalized.args;
         if (!MUSIC_COMMANDS.has(command)) return false;
         if (command === '!remove' && this.isTicketChannel(message.channel)) return false;
+        if (typeof options.beforeCommand === 'function') await options.beforeCommand(command);
 
         this.metrics.commands += 1;
         const cooldown = this.checkCooldown(message, command);
