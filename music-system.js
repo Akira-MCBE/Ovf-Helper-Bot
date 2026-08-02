@@ -1028,7 +1028,7 @@ class MusicSystem {
         const playbackToken = token == null ? ++queue.playbackToken : token;
         const position = Math.max(0, Number(player?.position || queue.position || 0));
         const remaining = Math.max(0, queue.currentTrack.duration - position);
-        const delay = clamp(remaining + 3000, 3000, 30000);
+        const delay = clamp(remaining + 3000, 3000, 10000);
         queue.trackWatchdogTimer = setTimeout(() => {
             queue.trackWatchdogTimer = null;
             void this.runTrackWatchdog(queue, player, generation, playbackToken).catch(error => {
@@ -1052,7 +1052,10 @@ class MusicSystem {
         }
         const position = Math.max(0, Number(player?.position || queue.position || 0));
         const duration = Number(queue.currentTrack.duration || 0);
-        if (duration > 0 && position >= Math.max(0, duration - 1000)) {
+        const playerReportsEnded = player?.track === null &&
+            queue.playing &&
+            Date.now() - queue.playbackStartedAt >= 2000;
+        if (playerReportsEnded || (duration > 0 && position >= Math.max(0, duration - 1000))) {
             await this.serialize(queue.guildId, async () => {
                 if (queue.player !== player || queue.playerGeneration !== generation || queue.playbackToken !== playbackToken || !queue.currentTrack) return;
                 console.warn(`Lavalink did not emit a usable track-end event for guild ${queue.guildId}; advancing the queue from the playback watchdog.`);
