@@ -45,6 +45,7 @@ const client = new Client({
 // ==========================================
 
 const TOKEN = process.env.DISCORD_TOKEN;
+const BOT_SERVER_NICKNAME = process.env.BOT_SERVER_NICKNAME || 'Ms.Bon';
 
 // Gemini AI configuration for the !ask command
 // Add GEMINI_API_KEY in your Pella environment variables.
@@ -920,6 +921,27 @@ client.on('error', (error) => {
     console.error('Discord client error:', error);
 });
 
+async function applyConfiguredBotNickname() {
+    if (!BOT_SERVER_NICKNAME) return;
+    let updated = 0;
+    let failed = 0;
+
+    for (const guild of client.guilds.cache.values()) {
+        try {
+            const botMember = guild.members.me || await guild.members.fetchMe();
+            if (botMember.nickname !== BOT_SERVER_NICKNAME) {
+                await botMember.setNickname(BOT_SERVER_NICKNAME, 'Configured bot display name');
+            }
+            updated += 1;
+        } catch (error) {
+            failed += 1;
+            console.warn(`Could not set the bot nickname in guild ${guild.id}: ${error?.message || error}`);
+        }
+    }
+
+    console.log(`Bot nickname "${BOT_SERVER_NICKNAME}" applied in ${updated} guild(s)${failed ? `; ${failed} failed` : ''}.`);
+}
+
 // ==========================================
 // READY EVENT
 // ==========================================
@@ -960,6 +982,8 @@ client.once('clientReady', async () => {
     ],
     status: 'online'
 });
+
+    await applyConfiguredBotNickname();
 
     try {
 
