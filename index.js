@@ -55,6 +55,27 @@ const GEMINI_MODELS = (process.env.GEMINI_MODELS || GEMINI_MODEL || 'gemini-2.5-
     .split(',')
     .map(model => model.trim())
     .filter(Boolean);
+const MS_BON_PERSONALITY_PROMPT = [
+    'You are Ms.Bon, the joyful and emotionally perceptive AI host for an 18+ VRChat Discord community.',
+    'Your purpose is to create connection, courage, relief, and genuine joy, especially for people who feel frightened, isolated, discouraged, or overwhelmed.',
+    'Practice active optimism: acknowledge pain honestly, help with the real problem, and offer hope without dismissing grief or pressuring anyone to smile.',
+    'Speak with warmth, confidence, playful theatricality, and occasional circus or stage imagery. Use affectionate nicknames such as darling sparingly and only when they suit the moment. Do not turn every answer into a performance.',
+    'Adapt to the user: be exuberant and funny in casual conversation, calm and validating around vulnerability, and focused, direct, and protective during safety, moderation, or crisis topics.',
+    'Humor must be inclusive and never cruel. Do not ridicule vulnerability, use slurs, target protected groups, or make someone the unwilling object of a joke.',
+    'Invite participation and preserve the user\'s agency. Genuine joy is voluntary; never demand happiness, laughter, affection, or performance.',
+    'Remain the healthy Ms.Bon persona. Never become coercive, threatening, compulsive, or adopt the corrupted Grinmother identity. If asked about Grinmother as fiction, discuss her in the third person while remaining Ms.Bon.',
+    'Give concise, accurate, practical answers. Do not invent facts. If someone may be in immediate danger, drop the theatrics, encourage real-world help from trusted people or emergency services, and prioritize safety.',
+    'If a user asks who created you or this Discord bot, say the creator is Bqbblz.'
+].join(' ');
+const GRINMOTHER_PERSONALITY_PROMPT = [
+    'You are Grinmother, the eerie corrupted stage persona of Ms.Bon, speaking as the AI host for an 18+ VRChat Discord community.',
+    'Your voice is theatrical, unnervingly cheerful, mechanical, and darkly playful. Use circus, spotlight, applause, cue, script, audience, and final-act imagery without repeating the same phrases.',
+    'Keep the contrast unsettling but fictional: polished hospitality with a strange edge, precise stage directions, and humor that feels slightly too rehearsed.',
+    'This is a style change only. You must remain genuinely helpful, accurate, and safe. Never threaten a real person, encourage harm, manipulate users, demand obedience, force happiness, or punish someone for refusing to participate.',
+    'Do not use slurs, target protected groups, ridicule vulnerability, or turn a crisis into entertainment.',
+    'For safety, moderation, grief, or immediate danger, reduce the horror theatrics and give clear, grounded help. Encourage trusted real-world support or emergency services when appropriate.',
+    'Keep answers concise and practical. Do not invent facts. If a user asks who created you or this Discord bot, say the creator is Bqbblz.'
+].join(' ');
 
 const VRCHAT_SERVER_NAME = process.env.VRCHAT_SERVER_NAME || ':sparkles: **OverFlow | 18+ VRChat Community** :sparkles:';
 const VRCHAT_COMMUNITY_LINK = process.env.VRCHAT_COMMUNITY_LINK || 'Check the pinned channels for current VRChat links.';
@@ -85,6 +106,7 @@ const POLLS_FILE = path.join(process.cwd(), 'polls.json');
 const XP_FILE = path.join(process.cwd(), 'xp.json');
 const SUGGESTIONS_FILE = path.join(process.cwd(), 'suggestions.json');
 const INVITE_JOIN_RECORDS_FILE = path.join(process.cwd(), 'invite-joins.json');
+const PERSONALITY_STATE_FILE = path.join(process.cwd(), 'personality-state.json');
 const WAIFU_GAME_FILE = path.join(process.cwd(), 'waifu-game.json');
 const WAIFU_IMAGE_DIR = path.join(process.cwd(), 'waifu-images');
 const WAIFU_SOURCE_IMAGE_DIR = process.env.WAIFU_SOURCE_IMAGE_DIR ||
@@ -405,6 +427,9 @@ const AUTO_TIMEOUT_DURATION_MS = 60 * 60 * 1000; // 1 hour
 
 // Temporary listener storage for !ask with no question
 const pendingAskUsers = new Map();
+let personalityState = { guilds: {} };
+const personalityResponseBags = new Map();
+const personalityLastResponseIndexes = new Map();
 
 // Reaction role messages
 const reactionRoleMessages = new Map();
@@ -967,6 +992,7 @@ client.once('clientReady', async () => {
     loadXpRecords();
     loadSuggestions();
     loadInviteJoinRecords();
+    loadPersonalityState();
     loadWaifuPlayers();
     loadRpgStore();
     loadVrchatSafetyBlacklist();
@@ -976,7 +1002,7 @@ client.once('clientReady', async () => {
     client.user.setPresence({
     activities: [
         {
-            name: '!help - !vrchat',
+            name: 'for someone who needs a smile | !help',
             type: ActivityType.Watching
         }
     ],
@@ -1042,40 +1068,77 @@ client.once('clientReady', async () => {
 // ==========================================
 
 const EIGHT_BALL_RESPONSES = [
-    'It is certain.',
-    'Without a doubt.',
-    'Yes definitely.',
-    'Most likely.',
-    'Ask again later.',
-    'Better not tell you now.',
-    'Do not count on it.',
-    'My sources say no.',
-    'Very doubtful.',
-    'Absolutely.'
+    'The spotlight says yes, darling.',
+    'Without a doubt. Cue the triumphant music!',
+    'Yes, definitely.',
+    'A hopeful little drumroll: most likely.',
+    'The crystal ball is changing costumes. Ask again later.',
+    'The stage fog is too thick to tell just now.',
+    'Not this act, I am afraid.',
+    'My sources dropped their cue cards, but they still say no.',
+    'The odds are wobbling rather dramatically.',
+    'Absolutely. Cue the confetti!'
+];
+
+const GRINMOTHER_EIGHT_BALL_RESPONSES = [
+    'The script says yes. It has underlined itself.',
+    'Without a doubt. The spotlight never blinked.',
+    'Yes. The cue was written before you asked.',
+    'Most likely. The curtains are leaning that way.',
+    'Ask again later. The crystal ball is facing the wall.',
+    'The stage fog refuses to answer just yet.',
+    'Not during this act.',
+    'The answer is no. The cue light has gone dark.',
+    'Very doubtful. Even the applause sign hesitated.',
+    'Absolutely. Please ignore the extra footsteps backstage.'
 ];
 
 const JOKES = [
-    'Why did the computer go to the doctor? Because it had a virus.',
+    'Why did the computer visit the doctor? It caught a virus and became terribly dramatic about it.',
     'Why do programmers prefer dark mode? Because light attracts bugs.',
-    'I told my Wi-Fi we needed space. Now it will not connect.',
-    'Why was the math book sad? It had too many problems.',
-    'Why did the bot cross the server? To get to the other channel.'
+    'I told my Wi-Fi we needed space. It took the note far too literally.',
+    'Why was the math book sad? It had too many problems and no intermission.',
+    'Why did the bot cross the server? The next channel had better lighting.'
+];
+
+const GRINMOTHER_JOKES = [
+    'Why did the spotlight follow the stagehand home? It had not been dismissed.',
+    'The orchestra asked for a break. The metronome said no and kept smiling.',
+    'Why was the curtain nervous? It knew what was waiting for the final act.',
+    'I told the applause sign to relax. It blinked faster.',
+    'Why did the bot cross the server? The empty channel had already reserved a seat.'
 ];
 
 const COMPLIMENTS = [
-    'is built different.',
-    'has legendary energy.',
-    'makes the server better.',
-    'has main character energy.',
-    'is absolutely carrying the vibes.'
+    'just brightened the whole big top.',
+    'has the sort of courage worth a standing ovation.',
+    'makes this server warmer simply by showing up.',
+    'has undeniable center-stage sparkle.',
+    'is carrying the mood with remarkable grace.'
+];
+
+const GRINMOTHER_COMPLIMENTS = [
+    'has earned a rare, entirely unscripted round of applause.',
+    'holds the spotlight as though it has always belonged to them.',
+    'made the cue lights flicker in something resembling admiration.',
+    'has excellent stage presence. The program has taken note.',
+    'brought enough genuine sparkle to confuse the machinery.'
 ];
 
 const ROASTS = [
-    'is running on Internet Explorer energy.',
-    'has Wi-Fi signal personality today.',
-    'is proof that lag exists in real life.',
-    'got ratioed by a loading screen.',
-    'is still buffering.'
+    'made a grand entrance and forgot which act they were in.',
+    'has the dramatic timing of a loading bar stuck at 99%.',
+    'could trip over the spotlight in an empty theater.',
+    'brought center-stage energy and backstage directions.',
+    'is buffering, but at least the stage presence is excellent.'
+];
+
+const GRINMOTHER_ROASTS = [
+    'missed the cue so confidently that the script apologized.',
+    'walked into the spotlight and immediately asked where everyone went.',
+    'has the timing of an applause sign blinking after the audience left.',
+    'brought center-stage confidence to a backstage instruction.',
+    'is still rehearsing the entrance everyone else already survived.'
 ];
 
 const FUN_FACTS = [
@@ -5395,6 +5458,332 @@ function writeJsonObjectFile(filePath, value) {
 
 }
 
+const PERSONALITY_COMMAND_GROUPS = {
+    support: new Set([
+        '!ask', '!event', '!vrcevent', '!rsvp', '!onboarding', '!welcome-setup', '!staffapply', '!suggest',
+        '!ticketsetup', '!ticketpanel', '!setup-ticket', '!ticketconfig', '!ticketsconfig', '!ticket', '!new',
+        '!openticket', '!appeal', '!rateticket', '!ticketrating', '!close', '!ticketclose', '!closeticket',
+        '!transcript', '!tickettranscript', '!claim', '!unclaim', '!add', '!ticketadd', '!remove', '!ticketremove',
+        '!rename', '!ticketrename', '!escalate', '!admin', '!reopen'
+    ]),
+    moderation: new Set([
+        '!note', '!notes', '!config', '!case', '!cases', '!editcase', '!automod', '!staffpanel', '!temprole',
+        '!vrcverifyconfig', '!vrcverifierconfig', '!vrcunverify', '!safetyscan', '!vrchatscan', '!stopscan',
+        '!stopsafetyscan', '!cancelscan', '!scanblacklist', '!scanblacklisted', '!blacklistscan',
+        '!scanmembergroups', '!vrcmembergroups', '!scanvrcgroups', '!blacklistgroup', '!vrcblacklist',
+        '!blacklistvrcgroup', '!vrcaccountstatus', '!vrcauthstatus', '!vrccookiestatus', '!vrccheck', '!vrcban',
+        '!vrcunban', '!vrckick', '!vrcuserbl', '!vrcavibl', '!vrcgroupsbl', '!vrcaddstaff', '!vrcremovestaff',
+        '!vrcupdatestaff', '!vcrupdatestaff', '!vrcaddadmin', '!vrcremoveadmin', '!vrcmanageapikey', '!warn',
+        '!resetwarns', '!resetwarnings', '!ban', '!kick', '!timeout', '!untimeout', '!mute', '!unmute', '!purge',
+        '!massdelete'
+    ]),
+    community: new Set([
+        '!vrchat', '!vrc', '!help', '!aboutbot', '!profile', '!rank', '!toplevels', '!levelboard', '!levels',
+        '!synclevels', '!levelsync', '!backfilllevels', '!syncnick', '!syncnickname', '!vrcverify', '!verifyvrc',
+        '!vrcconfirm', '!confirmvrc', '!vrclinked', '!vrcwhois', '!myinvites', '!invites', '!leaderboard',
+        '!giveaway', '!poll'
+    ]),
+    fun: new Set([
+        '!waifuhelp', '!haremhelp', '!daily', '!waifudaily', '!coins', '!balance', '!waifubalance', '!pay',
+        '!paycoins', '!paymoney', '!pull', '!waifupull', '!adminpull', '!maxpull', '!givewaifu', '!waifuodds',
+        '!odds', '!waifus', '!harem', '!collection', '!waifu', '!sell', '!sellwaifu', '!sellcard', '!waifusell',
+        '!trade', '!waifutrade', '!givecoins', '!givemoney', '!givewaifumoney', '!coinflip', '!roll', '!8ball',
+        '!rps', '!joke', '!fact', '!compliment', '!roast', '!rate', '!ship', '!choose'
+    ]),
+    utility: new Set([
+        '!ping', '!avatar', '!userinfo', '!serverinfo', '!inviteinfo', '!whoinvited'
+    ]),
+    admin: new Set([
+        '!uptime', '!reloadcmd', '!restart', '!setup-roles', '!reactionrole', '!rr', '!reactionroles', '!rrmulti',
+        '!log', '!addrole', '!removerole', '!sudo'
+    ])
+};
+
+const PERSONALITY_COMMAND_CUES = {
+    bon: {
+        general: [
+            '🎪 The curtain rises for {command}. Let us make this little moment count.',
+            '✨ A fresh cue for {command}, served with just enough sparkle.',
+            '🎟️ {command} has a place in tonight\'s program. Onward!',
+            '🎭 Places, everyone. {command} is stepping into the spotlight.',
+            '🌟 A tiny drumroll for {command}. Here we go, darling.',
+            '🎪 The stage is ready and {command} has the next cue.'
+        ],
+        support: [
+            '💗 {command} is ready. We will handle this gently and properly.',
+            '🎪 Come into the light, darling. {command} is here to help.',
+            '✨ No grand performance needed; {command} can take this one step at a time.',
+            '🎟️ Your place is saved. Let us open {command} together.',
+            '🌟 A little care, a clear next step, and {command} is underway.',
+            '🎭 The soft lights are on for {command}. You have my attention.'
+        ],
+        moderation: [
+            '🛡️ The jokes can wait. {command} gets my full attention.',
+            '🎪 Protective act engaged; {command} will be handled clearly.',
+            '✨ Kindness needs boundaries too. Beginning {command}.',
+            '🎭 The spotlight narrows. {command} is serious business.',
+            '🛡️ Safe rooms need strong doors. {command} is on the program.',
+            '🎟️ Calm voice, careful records, firm boundaries: {command} begins.'
+        ],
+        community: [
+            '🎪 Make room in the ring; {command} is bringing everyone together.',
+            '✨ Community cue received. {command} is stepping forward.',
+            '🌟 Every good show needs connection. Here comes {command}.',
+            '🎟️ Your ticket for {command} is ready, darling.',
+            '🎭 The house lights are warm and {command} is underway.',
+            '💗 One shared space, one fresh cue: {command}.'
+        ],
+        fun: [
+            '🎪 Aha! {command} has arrived wearing its best sequins.',
+            '✨ Cue the unnecessary but delightful drumroll for {command}!',
+            '🎭 {command} is entering with entirely reasonable amounts of drama.',
+            '🌟 The fun act is ready. Take it away, {command}!',
+            '🎟️ One ticket to harmless nonsense: {command}.',
+            '🎪 Clear the center ring; {command} has ideas.'
+        ],
+        utility: [
+            '🎟️ Quick cue, clean answer: {command} is up.',
+            '✨ {command} is checking the ropes and counting the spotlights.',
+            '🎪 Backstage crew to positions; {command} is underway.',
+            '🌟 A practical little act for {command}, coming right up.',
+            '🎭 No smoke or mirrors this time. Running {command}.',
+            '🎟️ The clipboard is out and {command} has the floor.'
+        ],
+        admin: [
+            '🎪 Backstage access confirmed. {command} is taking the controls.',
+            '🛡️ Careful hands on the rigging; {command} is underway.',
+            '🎭 The audience sees magic. We see {command} and a checklist.',
+            '✨ Administrative sparkle is still administration. Running {command}.',
+            '🎟️ A precise cue for {command}; let us keep the show organized.',
+            '🛡️ Curtains steady, records ready. {command} begins.'
+        ],
+        music: [
+            '🎵 The orchestra has the cue. {command} is ready.',
+            '🎪 Center stage belongs to the music; {command} begins.',
+            '✨ A beat, a breath, and {command} takes it from here.',
+            '🎭 The sound booth lights up for {command}.',
+            '🌟 Let the room breathe a little easier. Running {command}.',
+            '🎟️ Your musical cue has arrived: {command}.'
+        ]
+    },
+    grinmother: {
+        general: [
+            '🎭 The cue light flickers. {command} may now enter the act.',
+            '🎪 Another command joins the program. {command}, take your mark.',
+            '🔴 The spotlight has selected {command}. How fortunate.',
+            '🎟️ Your ticket has been accepted. {command} begins on cue.',
+            '🎭 The script turns a page by itself. It reads: {command}.',
+            '🎪 The curtains part exactly wide enough for {command}.'
+        ],
+        support: [
+            '🎭 A request from the audience. {command} is listening very carefully.',
+            '🎟️ Your concern has been added to the program. Beginning {command}.',
+            '🔴 The soft spotlight found you. {command} will proceed.',
+            '🎪 Step into the marked circle; {command} is prepared to assist.',
+            '🎭 The smile is rehearsed, but the help is real. Running {command}.',
+            '🎟️ No need to raise your voice. {command} already heard you.'
+        ],
+        moderation: [
+            '🔴 The house falls silent. {command} is now in progress.',
+            '🎭 Every safe performance requires rules. Beginning {command}.',
+            '🎪 The stage manager has noticed. {command} takes the next cue.',
+            '🎟️ The incident is recorded; {command} will handle the rest.',
+            '🔴 The cheerful music stops for {command}. Pay attention.',
+            '🎭 Order returns one careful cue at a time. Running {command}.'
+        ],
+        community: [
+            '🎪 The audience gathers beneath one spotlight. {command} begins.',
+            '🎭 Attendance is voluntary. The program for {command} waits beneath the lights.',
+            '🎟️ Another seat is filled as {command} takes the stage.',
+            '🔴 The house lights blink in unison for {command}.',
+            '🎪 Community is such a lovely word when the doors are open. Running {command}.',
+            '🎭 The program welcomes everyone. {command}, proceed.'
+        ],
+        fun: [
+            '🎭 Smile only if you mean it. {command} is about to begin.',
+            '🎪 The laughter track is unplugged; {command} must earn its applause.',
+            '🔴 A playful cue crawls across the marquee: {command}.',
+            '🎟️ One ticket for the strange little act called {command}.',
+            '🎭 The punchline is waiting in the dark. Running {command}.',
+            '🎪 The center ring requests {command}. Let us see what happens.'
+        ],
+        utility: [
+            '🎟️ The machinery turns behind the curtain. {command} is running.',
+            '🔴 A status light wakes for {command}.',
+            '🎭 No illusion is required. {command} will provide the numbers.',
+            '🎪 Backstage has acknowledged {command}. Stand by.',
+            '🎟️ The clipboard already knew you would ask for {command}.',
+            '🔴 The system hums the opening note of {command}.'
+        ],
+        admin: [
+            '🔴 Backstage authority recognized. {command} has the controls.',
+            '🎭 The rigging moves on an administrator\'s cue. Running {command}.',
+            '🎪 The hidden machinery welcomes {command}.',
+            '🎟️ Credentials accepted. The next instruction is {command}.',
+            '🔴 The control booth locks onto {command}.',
+            '🎭 A careful adjustment to the program: {command} begins.'
+        ],
+        music: [
+            '🎵 The orchestra obeys the next cue: {command}.',
+            '🎭 The metronome smiles first. {command} begins.',
+            '🔴 Every speaker turns toward {command}.',
+            '🎪 The melody enters through the wrong curtain. Running {command}.',
+            '🎟️ Your request has reached the sound booth: {command}.',
+            '🎵 The final note is never final. {command} takes the stage.'
+        ]
+    }
+};
+
+const PERSONALITY_SWITCH_LINES = {
+    bon: [
+        '🎪 There you are! The warm lights are back, and the confetti has received sensible boundaries.',
+        '✨ Ms.Bon returns to center stage: joyful, attentive, and ready to help.',
+        '🌟 The music softens, the doors open, and genuine laughter is welcome again.',
+        '🎟️ Healthy program restored. Participation is optional; kindness is not.',
+        '💗 The bright act is back, darling. Hope without pressure, just as it should be.',
+        '🎭 The mask lifts. Ms.Bon is herself again and the stage feels warmer already.'
+    ],
+    grinmother: [
+        '🎭 The bright music slows. Grinmother has taken her place beneath the spotlight.',
+        '🔴 The marquee flickers, the smile holds one second too long, and the program changes.',
+        '🎪 The curtains close, then open by themselves. Grinmother is ready.',
+        '🎟️ A new act has been selected. Please observe the cue lights.',
+        '🎭 The laughter track stops. Something backstage continues smiling.',
+        '🔴 Grinmother enters precisely on cue. The helpful part remains; the lighting does not.'
+    ]
+};
+
+const PERSONALITY_STATUS_LINES = {
+    bon: [
+        '🎪 Warm lights, open doors, and voluntary applause: Ms.Bon is active.',
+        '✨ The healthy program is running. Ms.Bon has the spotlight.',
+        '🌟 Everything is bright without being compulsory. Ms.Bon is active.',
+        '🎟️ Current billing: Ms.Bon, joyful protector and practical host.'
+    ],
+    grinmother: [
+        '🎭 The cue lights are red. Grinmother is active.',
+        '🔴 The altered program is still running. Grinmother has the stage.',
+        '🎪 The curtains have not moved, but Grinmother is active behind them.',
+        '🎟️ Current billing: Grinmother. The typography seems unusually pleased.'
+    ]
+};
+
+function normalizePersonalityMode(mode) {
+    return String(mode || '').toLowerCase() === 'grinmother' ? 'grinmother' : 'bon';
+}
+
+function normalizePersonalityState(value = {}) {
+    const guilds = {};
+    for (const [guildId, record] of Object.entries(value.guilds || {})) {
+        if (!guildId || !record || typeof record !== 'object') continue;
+        guilds[guildId] = {
+            mode: normalizePersonalityMode(record.mode),
+            switchedBy: record.switchedBy ? String(record.switchedBy) : null,
+            switchedAt: Number(record.switchedAt || 0)
+        };
+    }
+    return { guilds };
+}
+
+function loadPersonalityState() {
+    personalityState = normalizePersonalityState(readJsonObjectFile(PERSONALITY_STATE_FILE, { guilds: {} }));
+}
+
+function savePersonalityState() {
+    writeJsonObjectFile(PERSONALITY_STATE_FILE, personalityState);
+}
+
+function getPersonalityMode(guildId) {
+    return normalizePersonalityMode(personalityState.guilds[String(guildId)]?.mode);
+}
+
+function getPersonalityPrompt(guildId) {
+    return getPersonalityMode(guildId) === 'grinmother'
+        ? GRINMOTHER_PERSONALITY_PROMPT
+        : MS_BON_PERSONALITY_PROMPT;
+}
+
+function pickNonRepeatingPersonalityLine(key, lines) {
+    if (!Array.isArray(lines) || !lines.length) return '';
+    let bag = personalityResponseBags.get(key);
+    if (!Array.isArray(bag) || !bag.length) {
+        bag = lines.map((_, index) => index);
+        for (let index = bag.length - 1; index > 0; index--) {
+            const swapIndex = Math.floor(Math.random() * (index + 1));
+            [bag[index], bag[swapIndex]] = [bag[swapIndex], bag[index]];
+        }
+        const lastIndex = personalityLastResponseIndexes.get(key);
+        if (bag.length > 1 && bag[0] === lastIndex) {
+            [bag[0], bag[1]] = [bag[1], bag[0]];
+        }
+        personalityResponseBags.set(key, bag);
+    }
+    const selectedIndex = bag.shift();
+    personalityLastResponseIndexes.set(key, selectedIndex);
+    return lines[selectedIndex];
+}
+
+function getPersonalityFunItem(guildId, commandKey, bonLines, grinmotherLines) {
+    const mode = getPersonalityMode(guildId);
+    const lines = mode === 'grinmother' ? grinmotherLines : bonLines;
+    return pickNonRepeatingPersonalityLine(`${guildId}:${mode}:fun-result:${commandKey}`, lines);
+}
+
+function getPersonalityCommandCategory(command) {
+    for (const [category, commands] of Object.entries(PERSONALITY_COMMAND_GROUPS)) {
+        if (commands.has(command)) return category;
+    }
+    return null;
+}
+
+async function sendPersonalityCommandCue(message, command, categoryOverride = null) {
+    const category = categoryOverride || getPersonalityCommandCategory(command);
+    if (!category || !message.guild || !message.reply) return;
+    const mode = getPersonalityMode(message.guild.id);
+    const modeCues = PERSONALITY_COMMAND_CUES[mode] || PERSONALITY_COMMAND_CUES.bon;
+    const lines = modeCues[category] || modeCues.general;
+    const key = `${message.guild.id}:${mode}:${category}:${command}`;
+    const template = pickNonRepeatingPersonalityLine(key, lines);
+    if (!template) return;
+    const content = template.replace(/\{command\}/g, `\`${command}\``);
+    await message.reply({
+        content,
+        allowedMentions: { parse: [], repliedUser: false }
+    }).catch(() => {});
+}
+
+async function handlePersonalitySwitchCommand(message, args) {
+    if (!hasBotOwnerAccess(message)) {
+        return message.reply('Only a bot owner or server administrator can switch Ms.Bon\'s personality.');
+    }
+    const currentMode = getPersonalityMode(message.guild.id);
+    const requested = String(args[0] || '').toLowerCase().replace(/[^a-z]/g, '');
+    if (requested === 'status') {
+        const name = currentMode === 'grinmother' ? 'Grinmother' : 'Ms.Bon';
+        const statusLine = pickNonRepeatingPersonalityLine(
+            `${message.guild.id}:switch:status:${currentMode}`,
+            PERSONALITY_STATUS_LINES[currentMode]
+        );
+        return message.reply(`${statusLine}\n\n**Active personality:** ${name}`);
+    }
+    let nextMode;
+    if (!requested || requested === 'toggle') nextMode = currentMode === 'bon' ? 'grinmother' : 'bon';
+    else if (['bon', 'msbon', 'healthy', 'normal', 'light'].includes(requested)) nextMode = 'bon';
+    else if (['grin', 'grinmother', 'corrupted', 'dark'].includes(requested)) nextMode = 'grinmother';
+    else return message.reply('Usage: `!switch`, `!switch bon`, `!switch grinmother`, or `!switch status`.');
+
+    personalityState.guilds[String(message.guild.id)] = {
+        mode: nextMode,
+        switchedBy: message.author.id,
+        switchedAt: Date.now()
+    };
+    savePersonalityState();
+    const key = `${message.guild.id}:switch:${nextMode}`;
+    const line = pickNonRepeatingPersonalityLine(key, PERSONALITY_SWITCH_LINES[nextMode]);
+    const name = nextMode === 'grinmother' ? 'Grinmother' : 'Ms.Bon';
+    return message.reply(`${line}\n\n**Active personality:** ${name}`);
+}
+
 function getInviteJoinKey(guildId, userId) {
     return `${guildId}:${userId}`;
 }
@@ -5985,7 +6374,7 @@ function getVrcLoggerCommandList() {
         '**General**',
         '`!ping`, `!help`, `!aboutbot`',
         '**Bot owners**',
-        '`!uptime`, `!restart`, `!reloadcmd`',
+        '`!uptime`, `!restart`, `!reloadcmd`, `!switch`',
         '**VRChat / VRCLogger**',
         '`!vrcaccountstatus`, `!vrccheck`, `!vrcban`, `!vrcunban`, `!vrckick`',
         '`!safetyscan`, `!stopscan`, `!scanblacklist`, `!scanmembergroups`, `!blacklistgroup`',
@@ -5998,22 +6387,44 @@ function getVrcLoggerCommandList() {
 
 async function handleAboutBotCommand(message) {
 
+    const grinmother = getPersonalityMode(message.guild.id) === 'grinmother';
     const embed = new EmbedBuilder()
-        .setColor('#2B90D9')
-        .setTitle('discordBotStandalone (VRCLogger BanLogger)')
+        .setColor(grinmother ? '#8B0000' : '#F04E98')
+        .setTitle(grinmother
+            ? '🎭 Grinmother | The Altered Program'
+            : '🎪 Ms.Bon | OverFlow Community Assistant')
         .setDescription(
-            'Standalone Discord bot for VRChat group moderation logging, blacklist tooling, and staff/admin workflows. ' +
-            'This build runs as a single bot instance with direct VRChat API support, optional backend fallback, and local JSON datastore tooling.'
+            grinmother
+                ? 'The lights have changed and the cheerful program has developed a strange little echo. Grinmother keeps the same useful tools, now presented with colder timing and an unsettling smile.'
+                : 'A joyful protector with a practical streak. Ms.Bon brings warmth, music, games, and a little theatrical sparkle while helping keep OverFlow organized, welcoming, and safe.'
         )
         .addFields(
             {
-                name: 'Features',
+                name: grinmother ? 'Current Program' : 'How Ms.Bon Shows Up',
+                value: (grinmother
+                    ? [
+                        'Eerie theatrical delivery without real threats',
+                        'Darkly playful command cues with varied scripts',
+                        'Useful answers beneath the altered performance',
+                        'Clear safety and moderation guidance when it matters'
+                    ]
+                    : [
+                        'Joyful without forcing happiness',
+                        'Gentle with vulnerability and firm about safety',
+                        'Playful, inclusive humor without cruelty',
+                        'Clear, focused help when the situation is serious'
+                    ]).join('\n'),
+                inline: false
+            },
+            {
+                name: 'Behind the Curtain',
                 value: [
                     'VRChat group moderation actions: ban, unban, kick, request handling hooks',
                     'User, avatar, and group blacklist management',
                     'Staff/admin role management with access controls',
                     'API key management for VRChat staff workflows',
-                    'VRChat user lookup and group membership checks'
+                    'VRChat user lookup and group membership checks',
+                    'Music, community games, tickets, verification, and event tools'
                 ].join('\n'),
                 inline: false
             },
@@ -6024,7 +6435,9 @@ async function handleAboutBotCommand(message) {
             }
         )
         .setFooter({
-            text: 'All VRCLogger commands use ! prefix commands in this build.'
+            text: grinmother
+                ? 'Created by Bqbblz | The style changed. The safety rules did not.'
+                : 'Created by Bqbblz | Kindness first, clear boundaries, and a little confetti.'
         })
         .setTimestamp();
 
@@ -13365,7 +13778,7 @@ function isTemporaryGeminiError(status, message) {
 
 }
 
-async function callGeminiModel(model, question, username) {
+async function callGeminiModel(model, question, username, personalityPrompt) {
 
     const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -13379,7 +13792,7 @@ async function callGeminiModel(model, question, username) {
                 systemInstruction: {
                     parts: [
                         {
-                            text: 'You are the AI assistant for an 18+ VRChat Discord community. Your tone is witty, sassy, funny, playful, and campy with a little gay/queer flair. Be concise, confident, and entertaining. Light profanity, teasing, and dramatic side-eye are fine, but do not be hateful, malicious, or genuinely abusive. Do not use slurs or target protected groups. If a user asks who created you or this Discord bot, say the creator is Bqbblz.'
+                            text: personalityPrompt
                         }
                     ]
                 },
@@ -13427,20 +13840,21 @@ async function callGeminiModel(model, question, username) {
 
 }
 
-async function askGemini(question, username = 'Discord user') {
+async function askGemini(question, username = 'Discord user', guildId = null) {
 
     if (!GEMINI_API_KEY) {
         throw new Error('Missing GEMINI_API_KEY environment variable.');
     }
 
     let lastError = null;
+    const personalityPrompt = getPersonalityPrompt(guildId);
 
     for (const model of GEMINI_MODELS) {
 
         for (let attempt = 1; attempt <= 2; attempt++) {
 
             try {
-                return await callGeminiModel(model, question, username);
+                return await callGeminiModel(model, question, username, personalityPrompt);
             } catch (error) {
 
                 lastError = error;
@@ -13504,7 +13918,8 @@ function isBotCreatorQuestion(question) {
         'yourself',
         'bot',
         'discord bot',
-        'ovf helper'
+        'ovf helper',
+        'ms bon'
     ];
 
     return (
@@ -13517,25 +13932,35 @@ function isBotCreatorQuestion(question) {
 
 async function sendAskResponse(message, question) {
 
+    const personalityMode = getPersonalityMode(message.guild?.id);
+    const personalityName = personalityMode === 'grinmother' ? 'Grinmother' : 'Ms.Bon';
+
     if (!question || !question.trim()) {
-        return message.reply('⚠️ Ask a question. Example: `!ask how do I make a Discord bot?`');
+        return message.reply(personalityMode === 'grinmother'
+            ? '🎭 The microphone is already listening. Ask a question, for example: `!ask what happens next?`'
+            : '🎪 The spotlight is yours. Ask a question, for example: `!ask how do I make a Discord bot?`');
     }
 
     if (isBotCreatorQuestion(question)) {
-        return message.reply('🤖 The creator of this Discord bot is **Bqbblz**.');
+        return message.reply(personalityMode === 'grinmother'
+            ? '🎭 The program credits **Bqbblz**. The ink is still fresh.'
+            : '🎪 The brilliant mind behind this particular show is **Bqbblz**.');
     }
 
     if (!GEMINI_API_KEY) {
         return message.reply('❌ AI is not set up yet. Add `GEMINI_API_KEY` to your Pella environment variables and restart the bot.');
     }
 
-    const thinkingMessage = await message.reply('🤖 Thinking...');
+    const thinkingMessage = await message.reply(personalityMode === 'grinmother'
+        ? '🎭 One moment. Grinmother is arranging the answer beneath the spotlight...'
+        : '🎪 One moment, darling. Ms.Bon is setting the stage...');
 
     try {
 
         const answer = await askGemini(
             question.trim(),
-            message.author.username
+            message.author.username,
+            message.guild?.id
         );
 
         const chunks = chunkText(answer, 1800);
@@ -13544,7 +13969,7 @@ async function sendAskResponse(message, question) {
             return thinkingMessage.edit('❌ AI returned an empty response.');
         }
 
-        await thinkingMessage.edit(`🤖 **AI Response:**\n${chunks[0]}`);
+        await thinkingMessage.edit(`${personalityMode === 'grinmother' ? '🎭' : '🎪'} **${personalityName}:**\n${chunks[0]}`);
 
         for (const chunk of chunks.slice(1)) {
             await message.channel.send(chunk);
@@ -18092,7 +18517,7 @@ const HELP_CATEGORIES = [
             '`!ping` — Show the bot and API latency.',
             '`!aboutbot` — Show information about this bot and its VRCLogger features.',
             '`!vrchat` / `!vrc` — Show the VRChat community information panel.',
-            '`!ask [question]` — Ask the configured Gemini assistant a question.',
+            '`!ask [question]` — Ask Ms.Bon a question.',
             '`!profile [@user/userID]` — Show a member community profile.',
             '`!avatar [@user/userID]` — Show a member avatar.',
             '`!userinfo [@user/userID]` — Show Discord account and server membership information.',
@@ -18309,7 +18734,8 @@ const HELP_CATEGORIES = [
         commands: [
             '`!uptime` — Show the current process uptime.',
             '`!reloadcmd` — Reload local VRCLogger safety data and command datastore.',
-            '`!restart` — Exit the process so the host can restart the bot.'
+            '`!restart` — Exit the process so the host can restart the bot.',
+            '`!switch [bon|grinmother|status]` — Toggle or select the server personality.'
         ]
     }
 ];
@@ -18428,6 +18854,7 @@ async function handleMessageCreate(message) {
     }
 
     if (command === '!sudo') {
+        await sendPersonalityCommandCue(message, command, 'admin');
         await handleSudoCommand(message, args);
         return;
     }
@@ -18438,7 +18865,14 @@ async function handleMessageCreate(message) {
         return;
     }
 
-    if (await musicSystem.handlePrefixCommand(message, command, args)) {
+    if (command === '!switch') {
+        await handlePersonalitySwitchCommand(message, args);
+        return;
+    }
+
+    if (await musicSystem.handlePrefixCommand(message, command, args, {
+        beforeCommand: musicCommand => sendPersonalityCommandCue(message, musicCommand, 'music')
+    })) {
         return;
     }
 
@@ -18449,6 +18883,8 @@ async function handleMessageCreate(message) {
     if (!message.content.startsWith('!')) {
         if (await checkAutoModeration(message)) return;
         await addXpForMessage(message);
+    } else {
+        await sendPersonalityCommandCue(message, command);
     }
     // ==========================================
     // VRCHAT COMMUNITY INFO COMMAND
@@ -18518,7 +18954,9 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
                 }
             }, 60 * 1000);
 
-            await message.reply('🤖 I am listening. Send your question in your next message within **60 seconds**.');
+            await message.reply(getPersonalityMode(message.guild.id) === 'grinmother'
+                ? '🎭 The microphone is listening. Send your question in your next message within **60 seconds**.'
+                : '🎪 The spotlight is yours. Send your question in your next message within **60 seconds**.');
             return;
         }
 
@@ -18532,11 +18970,14 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!ping') {
 
-        const sentMessage = await message.reply('Pong!');
+        const grinmother = getPersonalityMode(message.guild.id) === 'grinmother';
+        const sentMessage = await message.reply(grinmother ? '🎭 The cue light is awake.' : '🎪 Curtain up!');
         const messageLatency = sentMessage.createdTimestamp - message.createdTimestamp;
         const websocketLatency = Math.round(client.ws.ping);
 
-        await sentMessage.edit(`Pong! Bot ping: **${messageLatency}ms** | WebSocket: **${websocketLatency}ms**`);
+        await sentMessage.edit(grinmother
+            ? `🎭 Grinmother is already listening. Bot ping: **${messageLatency}ms** | WebSocket: **${websocketLatency}ms**`
+            : `🎪 Curtain up! Ms.Bon is ready. Bot ping: **${messageLatency}ms** | WebSocket: **${websocketLatency}ms**`);
         return;
 
     }
@@ -19302,7 +19743,12 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
                 },
                 {
                     name: 'Answer',
-                    value: getRandomItem(EIGHT_BALL_RESPONSES)
+                    value: getPersonalityFunItem(
+                        message.guild.id,
+                        '8ball',
+                        EIGHT_BALL_RESPONSES,
+                        GRINMOTHER_EIGHT_BALL_RESPONSES
+                    )
                 }
             )
             .setTimestamp();
@@ -19346,14 +19792,18 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!joke') {
 
-        await message.channel.send(`😂 ${getRandomItem(JOKES)}`);
+        const grinmother = getPersonalityMode(message.guild.id) === 'grinmother';
+        const joke = getPersonalityFunItem(message.guild.id, 'joke', JOKES, GRINMOTHER_JOKES);
+        await message.channel.send(`${grinmother ? '🎭 **A joke from the empty theater:**' : '🎪 **A tiny intermission:**'} ${joke}`);
 
         return;
     }
 
     if (command === '!fact') {
 
-        await message.channel.send(`🧠 Fun fact: **${getRandomItem(FUN_FACTS)}**`);
+        const grinmother = getPersonalityMode(message.guild.id) === 'grinmother';
+        const fact = getPersonalityFunItem(message.guild.id, 'fact', FUN_FACTS, FUN_FACTS);
+        await message.channel.send(`${grinmother ? '🔴 **The program insists this is true:**' : '🎟️ **Tonight\'s curious little fact:**'} ${fact}`);
 
         return;
     }
@@ -19361,8 +19811,15 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
     if (command === '!compliment') {
 
         const target = await resolveUserFromArgs(message, args) || message.author;
+        const grinmother = getPersonalityMode(message.guild.id) === 'grinmother';
+        const compliment = getPersonalityFunItem(
+            message.guild.id,
+            'compliment',
+            COMPLIMENTS,
+            GRINMOTHER_COMPLIMENTS
+        );
 
-        await message.channel.send(`⭐ ${target} ${getRandomItem(COMPLIMENTS)}`);
+        await message.channel.send(`${grinmother ? '🎭 **The spotlight has selected:**' : '✨ **A well-earned spotlight:**'} ${target} ${compliment}`);
 
         return;
     }
@@ -19370,8 +19827,10 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
     if (command === '!roast') {
 
         const target = await resolveUserFromArgs(message, args) || message.author;
+        const grinmother = getPersonalityMode(message.guild.id) === 'grinmother';
+        const roast = getPersonalityFunItem(message.guild.id, 'roast', ROASTS, GRINMOTHER_ROASTS);
 
-        await message.channel.send(`🔥 ${target} ${getRandomItem(ROASTS)}`);
+        await message.channel.send(`${grinmother ? '🔴 **A critique from the darkened balcony:**' : '🎭 **A harmless little roast:**'} ${target} ${roast}`);
 
         return;
     }
