@@ -427,6 +427,7 @@ const AUTO_TIMEOUT_DURATION_MS = 60 * 60 * 1000; // 1 hour
 
 // Temporary listener storage for !ask with no question
 const pendingAskUsers = new Map();
+const pendingLeaveServerConfirmations = new Map();
 let personalityState = { guilds: {} };
 const personalityResponseBags = new Map();
 const personalityLastResponseIndexes = new Map();
@@ -5495,7 +5496,7 @@ const PERSONALITY_COMMAND_GROUPS = {
     ]),
     admin: new Set([
         '!uptime', '!reloadcmd', '!restart', '!setup-roles', '!reactionrole', '!rr', '!reactionroles', '!rrmulti',
-        '!log', '!addrole', '!removerole', '!sudo'
+        '!log', '!addrole', '!removerole', '!sudo', '!leaveserver'
     ])
 };
 
@@ -6374,7 +6375,7 @@ function getVrcLoggerCommandList() {
         '**General**',
         '`!ping`, `!help`, `!aboutbot`',
         '**Bot owners**',
-        '`!uptime`, `!restart`, `!reloadcmd`, `!switch`',
+        '`!uptime`, `!restart`, `!reloadcmd`, `!switch`, `!leaveserver`',
         '**VRChat / VRCLogger**',
         '`!vrcaccountstatus`, `!vrccheck`, `!vrcban`, `!vrcunban`, `!vrckick`',
         '`!safetyscan`, `!stopscan`, `!scanblacklist`, `!scanmembergroups`, `!blacklistgroup`',
@@ -6484,6 +6485,44 @@ async function handleRestartCommand(message) {
     setTimeout(() => {
         process.exit(0);
     }, 1000);
+
+}
+
+async function handleLeaveServerCommand(message, args) {
+
+    if (!hasBotOwnerAccess(message)) {
+        return message.reply('No permission. Bot owner or server administrator access is required.');
+    }
+
+    const confirmationKey = `${message.guild.id}:${message.author.id}`;
+    const pending = pendingLeaveServerConfirmations.get(confirmationKey);
+    const confirmed = String(args[0] || '').toLowerCase() === 'confirm';
+
+    if (!confirmed || !pending || pending.expiresAt < Date.now()) {
+        pendingLeaveServerConfirmations.set(confirmationKey, {
+            expiresAt: Date.now() + 30 * 1000
+        });
+        return message.reply({
+            content: `⚠️ This will remove the bot from **${truncateText(message.guild.name, 100)}**. Run \`!leaveserver confirm\` within **30 seconds** to continue.`,
+            allowedMentions: { parse: [], repliedUser: false }
+        });
+    }
+
+    pendingLeaveServerConfirmations.delete(confirmationKey);
+    await message.reply({
+        content: `Leaving **${truncateText(message.guild.name, 100)}** now.`,
+        allowedMentions: { parse: [], repliedUser: false }
+    });
+
+    try {
+        await message.guild.leave();
+    } catch (error) {
+        console.error(`Failed to leave Discord server ${message.guild.id}:`, error);
+        await message.channel.send({
+            content: `❌ I could not leave the server: ${truncateText(error.message, 250)}`,
+            allowedMentions: { parse: [] }
+        }).catch(() => {});
+    }
 
 }
 
@@ -18735,7 +18774,8 @@ const HELP_CATEGORIES = [
             '`!uptime` — Show the current process uptime.',
             '`!reloadcmd` — Reload local VRCLogger safety data and command datastore.',
             '`!restart` — Exit the process so the host can restart the bot.',
-            '`!switch [bon|grinmother|status]` — Toggle or select the server personality.'
+            '`!switch [bon|grinmother|status]` — Toggle or select the server personality.',
+            '`!leaveserver [confirm]` — Remove the bot from this server after a 30-second confirmation.'
         ]
     }
 ];
@@ -18999,6 +19039,11 @@ OverFlow is an 18+ VRChat community focused on socializing, entertainment, event
 
     if (command === '!restart') {
         await handleRestartCommand(message);
+        return;
+    }
+
+    if (command === '!leaveserver') {
+        await handleLeaveServerCommand(message, args);
         return;
     }
 
